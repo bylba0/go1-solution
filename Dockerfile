@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Hackathon Go1 — образ решения (Participant). Требования ТЗ_T1: linux/amd64, Ubuntu 22.04, ROS 2 Humble,
 # rmw_cyclonedds_cpp, только CPU, не root, без интернета на испытаниях (всё скачивается здесь, на этапе сборки).
 #
@@ -38,7 +37,9 @@ RUN source /opt/ros/humble/setup.bash && cd /opt/go1_ws \
 # Python-колёса по lock-файлу симулятора (те же версии и sha256: mujoco==3.3.7 и др.); numpy и zipp — из apt
 COPY config/standalone-python.lock /opt/wheels/requirements.lock
 RUN python3 -m pip download --only-binary=:all: --no-deps --require-hashes \
-        -r /opt/wheels/requirements.lock -d /opt/wheels
+        -r /opt/wheels/requirements.lock -d /opt/wheels \
+    && python3 -m pip install --no-index --find-links=/opt/wheels --no-deps --require-hashes \
+        --prefix=/opt/pyprefix -r /opt/wheels/requirements.lock
 
 # ---------------------------------------------------------------- этап 2: итоговый образ
 FROM --platform=linux/amd64 ${BASE_IMAGE} AS runtime
@@ -46,15 +47,13 @@ USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ros-humble-rmw-cyclonedds-cpp python3-numpy python3-zipp python3-pip bc \
+        ros-humble-rmw-cyclonedds-cpp python3-numpy python3-zipp \
     && rm -rf /var/lib/apt/lists/*
 
-# Колёса ставятся без сети и с проверкой хэшей; затем проверяем версию и что numpy остался 1.x (ROS Humble)
-COPY --from=build /opt/wheels /opt/wheels
-RUN python3 -m pip install --no-index --find-links=/opt/wheels --no-deps --require-hashes \
-        -r /opt/wheels/requirements.lock \
-    && rm -rf /opt/wheels /root/.cache \
-    && python3 -c "import mujoco, numpy; assert mujoco.__version__ == '3.3.7', mujoco.__version__; assert int(numpy.__version__.split('.')[0]) < 2"
+# Колёса установлены на этапе сборки (с проверкой хэшей) в отдельный префикс; pip в итоговом образе не нужен.
+# pip из Debian с --prefix кладёт в <prefix>/local/lib/python3.10/dist-packages → копируем в /usr/local (есть в sys.path). Проверяем версию и что numpy остался 1.x (ROS Humble).
+COPY --from=build /opt/pyprefix/local/ /usr/local/
+RUN python3 -c "import mujoco, numpy; assert mujoco.__version__ == '3.3.7', mujoco.__version__; assert int(numpy.__version__.split('.')[0]) < 2"
 
 COPY --from=build /opt/go1_ws/install /opt/go1_ws/install
 
