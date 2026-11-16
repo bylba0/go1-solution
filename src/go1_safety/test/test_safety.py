@@ -14,8 +14,9 @@ from go1_safety.collision import BLOCKED, DONE, CollisionChecker
 from go1_safety.core import (HOLD_KD, HOLD_KP, HOME_Q, MAX_STEP_RAD, MODE_SERVO, Q_MAX, Q_MAX_TZ, Q_MIN, Q_MIN_TZ,
                              SafetyCore)
 
-REPO_MODELS = pathlib.Path(__file__).resolve().parents[3] / 'models' / 'unitree_go1'
-MODEL_DIR = pathlib.Path(os.environ.get('GO1_MODEL_DIR', REPO_MODELS))
+_here = pathlib.Path(__file__).resolve()
+REPO_MODELS = (_here.parents[3] if len(_here.parents) > 3 else _here.parent) / 'models' / 'unitree_go1'
+MODEL_DIR = pathlib.Path(os.environ.get('GO1_MODEL_DIR') or REPO_MODELS)
 GO1 = str(MODEL_DIR / 'go1.xml')
 DEG = math.pi / 180
 JUDGE_LIMIT = 0.001          # ТЗ: проникновение строго > 1 мм — нарушение
