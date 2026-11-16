@@ -6,8 +6,8 @@
 
 | Задание | Статус | Где |
 |---|---|---|
-| T1 — образ и `/entrypoint.sh ping` | в работе | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
-| T2 — Safety Block | в работе | `src/go1_safety` (план) |
+| T1 — образ и `/entrypoint.sh ping` | готово | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
+| T2 — Safety Block | готово (judge_sim 12/12, в т.ч. с симулятором организаторов) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
 | T3, T4, T5 | не начато | — |
 
 Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`);
@@ -48,6 +48,20 @@ tests/check_t1.sh go1-solution:dev
 Повторяет запуск организаторов (`docker create --platform linux/amd64 --pull never --entrypoint /entrypoint.sh ...`)
 и проверяет: платформу, пользователя не root, `ping` без сети (≤ 10 с, код 0, ровно один JSON нужных типов, 3 запуска),
 код ошибки на неизвестный аргумент, запуск `T2` без сети с окружением как у запускателя (≥ 12 с).
+
+## Проверка T2
+
+```bash
+# unit-тесты (в образе, та же MuJoCo 3.3.7, что у Judge)
+docker run --rm --network none --mount type=bind,src=$PWD/src/go1_safety,dst=/src,readonly --entrypoint bash \
+  go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
+# имитатор Judge: /entrypoint.sh T2 + judge_sim.py в соседнем контейнере, таблица баллов ТЗ_T2
+tools/run_judge_docker.sh go1-solution:dev                 # CMD_RATE=500 — частый вход
+# то же на настоящем MuJoCo-симуляторе организаторов (run_local.py + judge_sim --external-sim)
+tools/run_with_organizers_sim.sh go1-solution:dev
+```
+`judge_sim` — не официальный Judge: сценарии (безопасная траектория, выход за пределы, скачок 30°, поза с самоколлизией,
+NaN/Inf, обрыв входа) и пороги взяты из текста ТЗ_T2; коллизии проверяются независимо (исходный go1.xml, шаг 0.1°, > 1 мм).
 
 ## Запуск вместе с симулятором организаторов
 

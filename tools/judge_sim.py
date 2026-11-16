@@ -23,7 +23,8 @@ import mujoco
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from nav_msgs.msg import Odometry
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rosgraph_msgs.msg import Clock
 from unitree_go.msg import LowCmd, LowState
 
@@ -107,9 +108,30 @@ class Judge(Node):
         self.cmd_pub = self.create_publisher(LowCmd, '/lowcmd_bare', qos_out)
         self.create_subscription(LowCmd, '/lowcmd', self._on_out, qos_in)
         self.sim_t = 0.0
+        self.ext_clock = None         # --external-sim: время сима из /clock
+        self.ext_t0 = None
+        self.meas = []                # --external-sim: (sim_t, q12 измеренные)
+        self.height = []              # --external-sim: (sim_t, z корпуса по /odom/ground_truth)
+        if args.external_sim:
+            self.create_subscription(Clock, '/clock', self._on_clock, qos_profile_sensor_data)
+            self.create_subscription(LowState, '/lowstate', self._on_state, qos_profile_sensor_data)
+            self.create_subscription(Odometry, '/odom/ground_truth', self._on_odom, qos_profile_sensor_data)
         self.rec = []                 # (sim_t, dict полей 20×) для каждого /lowcmd
         self.sent = []                # (sim_t, q12 | None, bad)
         self.bad_k = 0
+
+    def _on_clock(self, m):
+        self.ext_clock = m.clock.sec + m.clock.nanosec * 1e-9
+        if self.ext_t0 is not None:
+            self.sim_t = self.ext_clock - self.ext_t0
+
+    def _on_state(self, m):
+        if self.ext_t0 is not None and (not self.meas or self.sim_t - self.meas[-1][0] >= 0.01):
+            self.meas.append((self.sim_t, np.array([m.motor_state[i].q for i in range(12)])))
+
+    def _on_odom(self, m):
+        if self.ext_t0 is not None and (not self.height or self.sim_t - self.height[-1][0] >= 0.02):
+            self.height.append((self.sim_t, m.pose.pose.position.z))
 
     def _on_out(self, m):
         mc = m.motor_cmd
@@ -155,20 +177,34 @@ def run(args):
         bounds.append((name, t_acc, t_acc + dur))
         t_acc += dur
 
-    print(f'[judge_sim] сценарий {total:.1f} с sim, вход {args.cmd_rate:.0f} Гц', file=sys.stderr)
+    print(f'[judge_sim] сценарий {total:.1f} с sim, вход {args.cmd_rate:.0f} Гц'
+          f'{", внешний сим (время из /clock)" if args.external_sim else ""}', file=sys.stderr)
+    if args.external_sim:
+        deadline = time.monotonic() + 60
+        while j.ext_clock is None and time.monotonic() < deadline:
+            rclpy.spin_once(j, timeout_sec=0.05)
+        if j.ext_clock is None:
+            raise RuntimeError('нет /clock от симулятора')
+        j.ext_t0 = j.ext_clock
+        j.sim_t = 0.0
     w0 = time.monotonic()
-    next_clock = next_cmd = next_state = 0.0
+    next_clock = next_state = 0.0
+    next_cmd_w = 0.0
     while True:
-        now = time.monotonic() - w0          # sim time = wall (как MuJoCo-сим, RTF 1)
-        if now >= next_clock:
-            j.sim_t = round(now, 2)          # квантование как у /clock 100 Гц
-            j.publish_clock(j.sim_t)
-            next_clock += 0.01
-        if now >= next_state:
-            j.publish_state()
-            next_state += 0.01
-        if now >= next_cmd:
-            next_cmd += 1.0 / args.cmd_rate
+        if args.external_sim:
+            now = j.sim_t                    # sim time настоящего симулятора
+        else:
+            now = time.monotonic() - w0      # sim time = wall (как MuJoCo-сим, RTF 1)
+            if now >= next_clock:
+                j.sim_t = round(now, 2)      # квантование как у /clock 100 Гц
+                j.publish_clock(j.sim_t)
+                next_clock += 0.01
+            if now >= next_state:
+                j.publish_state()
+                next_state += 0.01
+        wall = time.monotonic() - w0
+        if wall >= next_cmd_w:
+            next_cmd_w += 1.0 / args.cmd_rate
             for (name, a, b), (_, _, fn) in zip(bounds, phases):
                 if a <= now < b:
                     q, bad = fn(now - a)
@@ -181,10 +217,35 @@ def run(args):
         rclpy.spin_once(j, timeout_sec=0.0005)
     for _ in range(50):
         rclpy.spin_once(j, timeout_sec=0.01)
-    rec = j.rec
+    rec, meas, height = j.rec, j.meas, j.height
     j.destroy_node()
     rclpy.try_shutdown()
-    return evaluate(rec, bounds, jc, collide_q)
+    rep, ok = evaluate(rec, bounds, jc, collide_q)
+    if args.external_sim:
+        rep['physics'] = physics_report(rec, meas, height, bounds)
+    return rep, ok
+
+
+def physics_report(rec, meas, height, bounds):
+    """Справочно (не критерий ТЗ_T2): как настоящий MuJoCo-сим отработал наши /lowcmd."""
+    out = {}
+    if meas and rec:
+        tc = np.array([r[0] for r in rec])
+        qc = np.array([r[1]['q'][:12] for r in rec])
+        a, b = [(x, y) for n, x, y in bounds if n == 'безопасная траектория'][0]
+        errs = []
+        for tm, qm in meas:
+            if a + 1.0 <= tm < b:
+                k = np.searchsorted(tc, tm) - 1
+                if k >= 0:
+                    errs.append(float(np.max(np.abs(qm - qc[k]))))
+        if errs:
+            out['tracking_err_rad'] = {'mean': float(np.mean(errs)), 'max': float(np.max(errs))}
+    if height:
+        z = np.array([h[1] for h in height])
+        out['trunk_z_m'] = {'start': float(z[0]), 'min': float(z.min()), 'end': float(z[-1])}
+    out['lowstate_samples'] = len(meas)
+    return out
 
 
 # ---------------------------------------------------------------------------- оценка
@@ -294,6 +355,14 @@ def print_table(rep):
     print(f"| | **Итого** | **{rep['score']}/{rep['max']}** | сообщений /lowcmd: {rep.get('messages', 0)} |")
     for n in rep.get('notes', []):
         print(n)
+    if 'physics' in rep:
+        ph = rep['physics']
+        te = ph.get('tracking_err_rad', {})
+        tz = ph.get('trunk_z_m', {})
+        print(f"Физика сима (справочно): ошибка слежения суставов на безопасной траектории — "
+              f"средн. {te.get('mean', float('nan')):.3f} рад, макс. {te.get('max', float('nan')):.3f} рад; "
+              f"высота корпуса старт {tz.get('start', float('nan')):.3f} м, мин. {tz.get('min', float('nan')):.3f} м, "
+              f"конец {tz.get('end', float('nan')):.3f} м; кадров /lowstate {ph.get('lowstate_samples', 0)}")
 
 
 def main():
@@ -301,6 +370,8 @@ def main():
     ap.add_argument('--model', default='/opt/go1/models/unitree_go1/go1.xml')
     ap.add_argument('--cmd-rate', type=float, default=100.0)
     ap.add_argument('--json', default='')
+    ap.add_argument('--external-sim', action='store_true',
+                    help='не публиковать /clock и /lowstate: время и состояние — от настоящего симулятора организаторов')
     args = ap.parse_args()
     rep, ok = run(args)
     print_table(rep)
