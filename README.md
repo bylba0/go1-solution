@@ -13,6 +13,8 @@
 Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`);
 `/entrypoint.sh ping` печатает его без запуска ROS.
 
+Новым участникам команды — [docs/TEAM_ONBOARDING.md](docs/TEAM_ONBOARDING.md).
+
 ## Репозитории
 
 | Репозиторий | Доступ | Что в нём |
