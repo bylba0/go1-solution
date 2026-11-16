@@ -60,6 +60,9 @@ class SafetyBlock(Node):
         # поэтому 200 Гц wall ≥ 200 Гц sim. Тайм-аут входа считается по sim time (self.get_clock()).
         self.create_timer(1.0 / rate, self._tick, clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.create_timer(self.stats_period, self._log_stats, clock=Clock(clock_type=ClockType.STEADY_TIME))
+        self.pending = None
+        self.pending_t = 0.0
+        self.n_in = 0
         self.n_pub = 0
         self.tick_cpu = 0.0
         self.tick_cpu_max = 0.0
@@ -81,15 +84,27 @@ class SafetyBlock(Node):
         self.state_sub = None
 
     def _on_cmd(self, msg):
+        # Только запоминаем: разбор 20×5 полей в Python дорог при частом входе (500 Гц → ~30% ядра).
+        # Такт обрабатывает самое свежее сообщение; невалидное отклоняется целиком (ТЗ), промежуточные валидные
+        # цели заменяются более новой — выход всё равно идёт к последней принятой цели рампой.
+        self.pending = msg
+        self.pending_t = self._now()
+        self.n_in += 1
+
+    def _process_pending(self):
+        msg, t_in = self.pending, self.pending_t
+        self.pending = None
         if len(msg.motor_cmd) != 20:
             self.core.stats.rejected_shape += 1
             return
-        if not self.core.on_command(read_fields(msg), self._now()):
+        if not self.core.on_command(read_fields(msg), t_in):
             self.get_logger().warn('Команда отклонена (NaN/Inf или неверная форма) — держу последнюю безопасную цель',
                                    throttle_duration_sec=2.0)
 
     def _tick(self):
         t0 = time.process_time()
+        if self.pending is not None:
+            self._process_pending()
         out = self.core.step(self._now())
         if out is None:
             return
@@ -114,9 +129,10 @@ class SafetyBlock(Node):
     def _log_stats(self):
         s = self.core.stats
         self.get_logger().info(
-            f'stats: pub {self.n_pub / self.stats_period:.0f} Гц, CPU такта {100 * self.tick_cpu / self.stats_period:.1f}% ядра '
+            f'stats: in {self.n_in / self.stats_period:.0f} Гц, pub {self.n_pub / self.stats_period:.0f} Гц, CPU такта {100 * self.tick_cpu / self.stats_period:.1f}% ядра '
             f'(макс {self.tick_cpu_max * 1000:.2f} мс), проверок {self.checker.evals}, принято {s.accepted}, '
             f'NaN/Inf {s.rejected_nonfinite}, клип q {s.clipped_q}, упоры {s.blocked}')
+        self.n_in = 0
         self.n_pub = 0
         self.tick_cpu = 0.0
         self.tick_cpu_max = 0.0
