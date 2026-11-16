@@ -103,10 +103,10 @@ class SafetyBlock(Node):
 
     def _tick(self):
         t0 = time.process_time()
-        if self.pending is not None:
-            self._process_pending()
         out = self.core.step(self._now())
         if out is None:
+            if self.pending is not None:
+                self._process_pending()
             return
         mc = self.out.motor_cmd
         for i in range(N_MOTORS):
@@ -119,6 +119,10 @@ class SafetyBlock(Node):
             c.tau = float(out.tau[i])
         self.pub.publish(self.out)
         self.n_pub += 1
+        # Вход разбираем ПОСЛЕ публикации: проверка пути новой цели (до ~45 мс в худшем случае) задерживает
+        # только следующий такт, а не текущее сообщение.
+        if self.pending is not None:
+            self._process_pending()
         if out.holding != self.was_holding:
             self.was_holding = out.holding
             self.get_logger().info('Удержание последней принятой цели (нет входа)' if out.holding else 'Вход есть — отрабатываю команды')
@@ -131,7 +135,8 @@ class SafetyBlock(Node):
         self.get_logger().info(
             f'stats: in {self.n_in / self.stats_period:.0f} Гц, pub {self.n_pub / self.stats_period:.0f} Гц, CPU такта {100 * self.tick_cpu / self.stats_period:.1f}% ядра '
             f'(макс {self.tick_cpu_max * 1000:.2f} мс), проверок {self.checker.evals}, принято {s.accepted}, '
-            f'NaN/Inf {s.rejected_nonfinite}, клип q {s.clipped_q}, упоры {s.blocked}')
+            f'NaN/Inf {s.rejected_nonfinite}, клип q {s.clipped_q}, отказ-коллизия {s.rejected_collision}, '
+            f'отходов {s.retreats}, упоры {s.blocked}, макс. проверок на цель {s.path_evals_max}')
         self.n_in = 0
         self.n_pub = 0
         self.tick_cpu = 0.0

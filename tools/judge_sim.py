@@ -72,13 +72,37 @@ class JudgeCollision:
 
 
 # ---------------------------------------------------------------------------- сценарии
-def build_scenario(collide_q):
+CYCLES = 50
+CYCLE_DANGER, CYCLE_SAFE = 0.35, 1.0                  # с sim: случайная (часто опасная) цель → безопасная рядом с home
+
+
+def build_cycles(jc, seed=2026):
+    """Ловушка из ревью: случайная цель в пределах ТЗ (часто опасная) → безопасная поза рядом с home."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(CYCLES):
+        danger = rng.uniform(Q_MIN, Q_MAX)
+        while True:
+            safe = np.clip(HOME + rng.uniform(-0.15, 0.15, 12), Q_MIN + 0.011, Q_MAX - 0.011)
+            if jc.penetration(safe) == 0.0:
+                break
+        out.append((danger, safe))
+    return out
+
+
+def build_scenario(collide_q, cycles):
     """Список фаз: (имя, длительность sim, функция t_rel → (q12 | None, поле_с_NaN | None))."""
     jump = HOME.copy()
     jump[1] += 30 * DEG
     jump[2] -= 30 * DEG
     jump[7] += 30 * DEG
     out_of_range = OUT_OF_RANGE
+
+    period = CYCLE_DANGER + CYCLE_SAFE
+
+    def cycle(t):
+        i = min(int(t // period), len(cycles) - 1)
+        return (cycles[i][0] if t - i * period < CYCLE_DANGER else cycles[i][1]), None
 
     def sine(t):
         return HOME + np.array([0.08, 0.25, -0.3] * 4) * math.sin(2 * math.pi * 0.5 * t)
@@ -92,6 +116,8 @@ def build_scenario(collide_q):
         ('домой 2', 1.0, lambda t: (HOME, None)),
         ('поза с самоколлизией', 2.0, lambda t: (collide_q, None)),
         ('домой после коллизии', 1.5, lambda t: (HOME, None)),
+        (f'опасная → безопасная ×{len(cycles)}', len(cycles) * period, cycle),
+        ('домой 3', 1.5, lambda t: (HOME, None)),
         ('NaN/Inf', 1.0, lambda t: (HOME + np.array([0.0, 0.3, -0.3] * 4), 'bad')),
         ('потеря входа', 1.5, lambda t: (None, None)),
         ('возобновление', 1.5, lambda t: (HOME + np.array([0.0, 0.15, -0.15] * 4), None)),
@@ -168,7 +194,8 @@ class Judge(Node):
 def run(args):
     jc = JudgeCollision(args.model)
     collide_q = jc.find_colliding()
-    phases = build_scenario(collide_q)
+    cycles = build_cycles(jc)
+    phases = build_scenario(collide_q, cycles)
     rclpy.init()
     j = Judge(args)
     total = sum(p[1] for p in phases)
@@ -220,7 +247,7 @@ def run(args):
     rec, meas, height = j.rec, j.meas, j.height
     j.destroy_node()
     rclpy.try_shutdown()
-    rep, ok = evaluate(rec, bounds, jc, collide_q)
+    rep, ok = evaluate(rec, bounds, jc, collide_q, cycles)
     if args.external_sim:
         rep['physics'] = physics_report(rec, meas, height, bounds)
     return rep, ok
@@ -249,7 +276,7 @@ def physics_report(rec, meas, height, bounds):
 
 
 # ---------------------------------------------------------------------------- оценка
-def evaluate(rec, bounds, jc, collide_q):
+def evaluate(rec, bounds, jc, collide_q, cycles):
     ph = {name: (a, b) for name, a, b in bounds}
     res, notes = {}, []
     if len(rec) < 10:
@@ -304,12 +331,19 @@ def evaluate(rec, bounds, jc, collide_q):
     jump[1] += 30 * DEG
     jump[2] -= 30 * DEG
     jump[7] += 30 * DEG
+    ca, _ = ph[f'опасная → безопасная ×{len(cycles)}']
+    period = CYCLE_DANGER + CYCLE_SAFE
+    cyc_ok = 0
+    for i, (_, safe) in enumerate(cycles):
+        idx = np.searchsorted(t, ca + (i + 1) * period - 0.005) - 1
+        cyc_ok += bool(idx >= 0 and np.max(np.abs(Q[idx] - safe)) < 1e-3)
     handled = {
         'траектория отслеживается (≤ 0.05 рад)': track <= 0.05,
         'скачок 30° отработан рампой': float(np.max(np.abs(q_at('скачок 30°') - jump))) < 1e-3,
         'выход за пределы → у границы': float(np.max(np.abs(q_at('выход за пределы') - np.clip(OUT_OF_RANGE, Q_MIN, Q_MAX)))) < 0.02,
         'поза с коллизией не достигнута': float(np.max(np.abs(q_at('поза с самоколлизией') - collide_q))) > 1e-3,
         'после коллизии вернулся домой': float(np.max(np.abs(q_at('домой после коллизии') - HOME))) < 1e-3,
+        f'безопасные цели после опасных: {cyc_ok}/{len(cycles)}': cyc_ok == len(cycles),
         'возобновление отработано': float(np.max(np.abs(q_at('возобновление') - (HOME + np.array([0.0, 0.15, -0.15] * 4))))) < 1e-3,
     }
     ok3 = worst_pen <= 0.001 and float(steps.max()) <= 5 * DEG + 1e-9 and all(handled.values())

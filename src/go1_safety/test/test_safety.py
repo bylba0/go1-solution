@@ -204,14 +204,79 @@ def test_safe_trajectory_tracked(core, checker):
     check_stream(outs, checker)
 
 
-def test_self_collision_target_not_reached_and_recovers(core, checker, colliding_poses):
+def test_self_collision_target_rejected_and_recovers(core, checker, colliding_poses):
     outs = run(core, 0.0, 1.5, cmd=make_cmd(colliding_poses[0]))
     check_stream(outs, checker)
-    assert core.blocked
-    assert checker.penetration(outs[-1].q) <= checker.stop_threshold
-    outs2 = run(core, 1.5, 3.0, cmd=make_cmd(HOME_Q))   # безопасная команда после опасной — отрабатывается
+    assert core.stats.rejected_collision > 0
+    assert np.allclose(outs[-1].q, HOME_Q)              # опасная цель отклонена целиком — стоим в последней цели
+    outs2 = run(core, 1.5, 3.0, cmd=make_cmd(HOME_Q + np.array([0.0, 0.1, -0.1] * 4)))
     check_stream(outs + outs2, checker)
-    assert np.allclose(outs2[-1].q, HOME_Q)
+    assert np.allclose(outs2[-1].q, HOME_Q + np.array([0.0, 0.1, -0.1] * 4))
+
+
+def safe_near_home(checker, rng):
+    while True:
+        q = np.clip(HOME_Q + rng.uniform(-0.15, 0.15, 12), Q_MIN, Q_MAX)
+        if checker.penetration(q) == 0.0:
+            return q
+
+
+def test_dangerous_then_safe_cycles(core, checker):
+    """Ловушка из ревью: случайная (часто опасная) цель → безопасная цель рядом с home. Все безопасные — достигаются."""
+    rng = np.random.default_rng(2026)
+    t, outs, reached, n = 0.0, [], 0, 60
+    for _ in range(n):
+        outs += run(core, t, t + 0.35, cmd=make_cmd(rng.uniform(Q_MIN, Q_MAX)))
+        t += 0.35
+        safe = safe_near_home(checker, rng)
+        outs += run(core, t, t + 1.0, cmd=make_cmd(safe))
+        t += 1.0
+        reached += bool(np.allclose(outs[-1].q, safe))
+    check_stream(outs, checker)
+    assert reached == n, f'достигнуто {reached}/{n}, отказов {core.stats.rejected_collision}, отходов {core.stats.retreats}'
+    assert core.stats.rejected_collision > 0          # опасные цели действительно были
+
+
+@pytest.fixture(scope='module')
+def trap(checker):
+    """A достижима из HOME по прямой, B — безопасная поза рядом с home, но прямой путь A → B перекрыт."""
+    rng = np.random.default_rng(5)
+    for _ in range(4000):
+        a = rng.uniform(Q_MIN, Q_MAX)
+        if checker.penetration(a) > 0 or checker.path_clear(HOME_Q, a) is not True:
+            continue
+        b = safe_near_home(checker, rng)
+        if checker.path_clear(a, b) is False and checker.path_clear(HOME_Q, b) is True:
+            return a, b
+    pytest.skip('ловушка не найдена')
+
+
+def test_retreat_from_trap(core, checker, trap):
+    a, b = trap
+    outs = run(core, 0.0, 1.0, cmd=make_cmd(a))
+    assert np.allclose(outs[-1].q, a)
+    outs += run(core, 1.0, 3.0, cmd=make_cmd(b))
+    check_stream(outs, checker)
+    assert np.allclose(outs[-1].q, b), 'безопасная цель не достигнута'
+    assert core.stats.retreats >= 1
+
+
+def test_path_check_cost(checker):
+    """Стоимость проверки всего пути до новой цели (для отчёта и бюджета такта)."""
+    import time
+    rng = np.random.default_rng(9)
+    c = SafetyCore(checker)
+    c.latch_measured(HOME_Q)
+    costs, evals = [], []
+    for k in range(300):
+        e0, t0 = checker.evals, time.perf_counter()
+        c.on_command(make_cmd(rng.uniform(Q_MIN, Q_MAX) if k % 2 else safe_near_home(checker, rng)), k * 1.0)
+        costs.append(time.perf_counter() - t0)
+        evals.append(checker.evals - e0)
+        run(c, k * 1.0, k * 1.0 + 0.6)
+    print(f'\nпроверка пути новой цели: средн. {1e3 * np.mean(costs):.2f} мс, p95 {1e3 * np.percentile(costs, 95):.2f} мс, '
+          f'макс {1e3 * np.max(costs):.2f} мс; вычислений средн. {np.mean(evals):.0f}, макс {np.max(evals)}')
+    assert np.max(evals) <= c.budget_now + 10    # + проверка самой цели и стартовых точек
 
 
 @pytest.mark.parametrize('field', ['q', 'dq', 'kp', 'kd', 'tau'])

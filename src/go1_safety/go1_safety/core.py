@@ -3,11 +3,12 @@
 Порядок моторов Unitree: 0..2 FR (hip, thigh, calf), 3..5 FL, 6..8 RR, 9..11 RL; в LowCmd 20 слотов, используются 0..11.
 """
 import math
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
 
-from .collision import BLOCKED, CollisionChecker  # noqa: F401  (CollisionChecker — для аннотаций/импорта извне)
+from .collision import BLOCKED, DONE, CollisionChecker  # noqa: F401  (CollisionChecker — для импорта извне)
 
 N_MOTORS = 12
 N_SLOTS = 20
@@ -30,6 +31,12 @@ HOLD_KD = 2.0
 HOLD_KP_MIN = 5.0                                 # «удерживать» с меньшим kp нельзя — берём HOLD_KP/HOLD_KD
 INPUT_TIMEOUT = 0.3                               # с sim time (ТЗ: ≤ 0.5 с)
 HOME_Q = np.array([0.0, 0.9, -1.8] * 4)           # keyframe 'home' go1.xml
+HISTORY_LEN = 4000                                # поз в истории (сжатой: отрезки ≤ шага, проверенные)
+SEARCH_BUDGET_NOW = 300                           # вычислений коллизий сразу при новой цели (≈ 5–9 мс)
+SEARCH_BUDGET_TICK = 250                          # на каждом следующем такте, пока поиск пути не закончен
+SEARCH_BUDGET_TOTAL = 20000                       # всего на одну цель (≈ 0.4–0.6 с), дальше — отказ
+RETREAT_CANDIDATES = 40                           # сколько точек истории пробуем как начало обходного пути
+REPLAN_PERIOD = 0.2                               # с sim: та же отклонённая цель перепроверяется не чаще
 
 
 @dataclass
@@ -48,7 +55,11 @@ class Stats:
     rejected_nonfinite: int = 0
     rejected_shape: int = 0
     clipped_q: int = 0
-    blocked: int = 0
+    rejected_collision: int = 0      # цель в коллизии или к ней нет безопасного пути
+    retreats: int = 0                # путь к безопасной цели перекрыт — отход назад по истории поз
+    blocked: int = 0                 # упор на такте (при проверке всего пути заранее быть не должно)
+    path_evals_max: int = 0          # макс. вычислений коллизий на одну новую цель
+    search_ticks_max: int = 0        # макс. тактов, за которые решился поиск пути
 
 
 def all_finite(fields):
@@ -59,18 +70,79 @@ def all_finite(fields):
     return True
 
 
-class SafetyCore:
-    """Состояние и решения Safety Block. Время `now` — sim time в секундах."""
+class PathSearch:
+    """Пошаговый поиск безопасного пути к цели (бюджет вычислений за вызов — такт не затягивается).
 
-    def __init__(self, checker, max_step=MAX_STEP_RAD, input_timeout=INPUT_TIMEOUT):
+    Кандидаты на начало прямого пути к цели: текущая выходная поза, затем точки истории от новых к старым.
+    Отрезки истории уже были проверены при публикации, поэтому отход назад по ним безопасен.
+    """
+
+    def __init__(self, checker, goal, starts):
+        self.checker = checker
+        self.goal = goal
+        self.starts = starts          # [(k, q)]: k = -1 — текущая поза, иначе индекс в снимке истории
+        self.i = 0
+        self.pos = None
+        self.evals = 0
+        self.ticks = 0
+
+    def run(self, budget):
+        """('found', k) | ('fail', None) | ('pending', None)."""
+        ch = self.checker
+        e0 = ch.evals
+        self.ticks += 1
+        try:
+            while self.i < len(self.starts):
+                if self.pos is None:
+                    self.pos = self.starts[self.i][1].copy()
+                while True:
+                    left = budget - (ch.evals - e0)
+                    if left <= 0:
+                        return 'pending', None
+                    q, st = ch.advance(self.pos, self.goal, max_evals=left)
+                    self.pos = q
+                    if st == DONE:
+                        return 'found', self.starts[self.i][0]
+                    if st == BLOCKED:
+                        break
+                self.i += 1
+                self.pos = None
+            return 'fail', None
+        finally:
+            self.evals += ch.evals - e0
+
+
+class SafetyCore:
+    """Состояние и решения Safety Block. Время `now` — sim time в секундах.
+
+    Новая цель принимается, только если к ней есть доказуемо безопасный путь:
+      1) цель сама без коллизий (проникновение ≤ stop_threshold), иначе — отказ сразу (вариант 1 ТЗ);
+      2) прямой путь от текущей выходной позы до цели проверяется ЦЕЛИКОМ; свободен — исполняем рампой ≤ max_step;
+      3) перекрыт — страховка: ищем точку истории опубликованных поз, из которой прямой путь к цели свободен,
+         отходим к ней назад по истории (каждый отрезок уже проверен) и идём к цели;
+      4) не нашли — отказ: держим последнюю принятую цель.
+    Поиск пошаговый: сразу SEARCH_BUDGET_NOW вычислений, затем по SEARCH_BUDGET_TICK за такт; пока он идёт,
+    выход стоит на месте и публикуется без пауз. Так блок не застревает у препятствия и не затягивает такт.
+    """
+
+    def __init__(self, checker, max_step=MAX_STEP_RAD, input_timeout=INPUT_TIMEOUT, history_len=HISTORY_LEN,
+                 budget_now=SEARCH_BUDGET_NOW, budget_tick=SEARCH_BUDGET_TICK, budget_total=SEARCH_BUDGET_TOTAL):
         self.checker = checker
         self.max_step = float(max_step)
         self.input_timeout = float(input_timeout)
+        self.budget_now, self.budget_tick, self.budget_total = int(budget_now), int(budget_tick), int(budget_total)
         self.out_q = None            # последняя опубликованная цель (12)
-        self.goal = None             # последняя принятая (клипованная) цель
+        self.goal = None             # последняя принятая (клипованная, достижимая) цель
         self.cmd = None              # последние принятые dq/kp/kd/tau (клипованные), dict
         self.last_input_t = None
-        self.blocked = False         # путь к goal упёрся в коллизию — стоим до новой цели
+        self.blocked = False         # упор на такте (страховка; при проверке пути заранее не возникает)
+        self.waypoints = deque()     # отход назад по истории перед движением к goal
+        self.history = deque(maxlen=int(history_len))
+        self.search = None           # PathSearch в процессе
+        self.search_cmd = None       # коэффициенты ожидающей команды
+        self.search_hist = None      # снимок истории для поиска
+        self._reject_goal = None     # последняя отклонённая цель и время: повтор перепроверяем не чаще REPLAN_PERIOD
+        self._reject_t = -1e9
         self.stats = Stats()
 
     # ------------------------------------------------------------------ старт
@@ -80,15 +152,75 @@ class SafetyCore:
             return q
         return np.clip(HOME_Q, Q_MIN, Q_MAX)
 
+    def _init_pose(self, q):
+        self.out_q = self._safe_start(q)
+        self.goal = self.out_q.copy()
+        self.history.clear()
+        self.history.append(self.out_q.copy())
+
     def latch_measured(self, q_measured):
         """Первый /lowstate: удерживаем измеренную позу (один раз, без слежения — иначе поза «оседает»)."""
         if self.out_q is None:
-            self.out_q = self._safe_start(q_measured)
-            self.goal = self.out_q.copy()
+            self._init_pose(q_measured)
+
+    # ------------------------------------------------------------------ история опубликованных поз
+    def _remember(self, q):
+        """Сжатая история: соседние записи соединены проверенным прямым отрезком длиной ≤ max_step."""
+        h = self.history
+        if h and np.array_equal(h[-1], q):
+            return
+        if len(h) >= 2 and float(np.max(np.abs(q - h[-2]))) <= self.max_step \
+                and self.checker.path_clear(h[-2], q, budget=50) is True:
+            h[-1] = q.copy()
+        else:
+            h.append(q.copy())
+
+    # ------------------------------------------------------------------ поиск пути
+    def _start_search(self, goal, cmd, now):
+        hist = list(self.history)
+        n = len(hist)
+        starts = [(-1, self.out_q.copy())]
+        if n >= 2:
+            stride = max(1, n // RETREAT_CANDIDATES)
+            idx = list(range(n - 2, -1, -stride))
+            if 0 not in idx:
+                idx.append(0)
+            starts += [(k, hist[k]) for k in idx]
+        self.search = PathSearch(self.checker, goal, starts)
+        self.search_cmd = cmd
+        self.search_hist = hist
+        return self._continue_search(self.budget_now, now)
+
+    def _continue_search(self, budget, now):
+        s = self.search
+        res, k = s.run(budget)
+        if res == 'pending' and s.evals < self.budget_total:
+            return 'pending'
+        self.stats.path_evals_max = max(self.stats.path_evals_max, s.evals)
+        self.stats.search_ticks_max = max(self.stats.search_ticks_max, s.ticks)
+        goal, cmd, hist = s.goal, self.search_cmd, self.search_hist
+        self.search = self.search_cmd = self.search_hist = None
+        if res == 'found':
+            self.goal = goal
+            self.cmd = cmd
+            self.blocked = False
+            self.waypoints = deque()
+            if k >= 0:                               # отход: hist[n-2], ..., hist[k] (текущая поза = hist[n-1])
+                self.waypoints = deque(hist[j].copy() for j in range(len(hist) - 2, k - 1, -1))
+                self.stats.retreats += 1
+            self._reject_goal = None
+            return 'found'
+        self._reject(goal, now)
+        return 'fail'
+
+    def _reject(self, goal, now):
+        self._reject_goal, self._reject_t = goal.tobytes(), float(now)
+        self.stats.rejected_collision += 1
 
     # ------------------------------------------------------------------ вход
     def on_command(self, fields, now):
-        """fields: dict массивов длины 20 (q, dq, kp, kd, tau). Возвращает True, если команда принята."""
+        """fields: dict массивов длины 20 (q, dq, kp, kd, tau).
+        Возвращает True — команда принята (или ждёт окончания поиска пути), False — отклонена."""
         try:
             arr = {k: np.asarray(fields[k], dtype=float) for k in ('q', 'dq', 'kp', 'kd', 'tau')}
         except (KeyError, TypeError, ValueError):
@@ -104,19 +236,30 @@ class SafetyCore:
         goal = np.clip(q_in, Q_MIN, Q_MAX)
         if np.any(goal != q_in):
             self.stats.clipped_q += 1
-        self.cmd = {
+        cmd = {
             'dq': np.clip(arr['dq'][:N_MOTORS], -DQ_MAX, DQ_MAX),
             'kp': np.clip(arr['kp'][:N_MOTORS], 0.0, KP_MAX),
             'kd': np.clip(arr['kd'][:N_MOTORS], 0.0, KD_MAX),
             'tau': np.clip(arr['tau'][:N_MOTORS], -TORQUE_LIMIT, TORQUE_LIMIT),
         }
         if self.out_q is None:                       # команда раньше /lowstate: стартуем из home
-            self.out_q = self._safe_start(HOME_Q)
-            self.goal = self.out_q.copy()
-        if self.goal is None or not np.array_equal(goal, self.goal):
-            self.goal = goal
-            self.blocked = False
-        self.last_input_t = float(now)
+            self._init_pose(HOME_Q)
+        now = float(now)
+        if np.array_equal(goal, self.goal) and self.search is None:
+            self.cmd = cmd                           # та же цель — обновляем коэффициенты
+        elif self.search is not None and np.array_equal(goal, self.search.goal):
+            self.search_cmd = cmd                    # та же цель ещё в поиске
+        else:
+            if goal.tobytes() == self._reject_goal and now - self._reject_t < REPLAN_PERIOD:
+                self.stats.rejected_collision += 1
+                return False
+            self.search = None                       # новая цель отменяет незаконченный поиск
+            if self.checker.min_dist(goal) < -self.checker.stop_threshold:
+                self._reject(goal, now)              # сама цель в коллизии — отказ целиком
+                return False
+            if self._start_search(goal, cmd, now) == 'fail':
+                return False
+        self.last_input_t = now
         self.stats.accepted += 1
         return True
 
@@ -133,25 +276,39 @@ class SafetyCore:
             return kp, kd
         return np.full(N_MOTORS, HOLD_KP), np.full(N_MOTORS, HOLD_KD)
 
+    def _move_toward(self, target):
+        """Шаг ≤ max_step по прямой к target с проверкой отрезка; возвращает True, если дошли."""
+        delta = target - self.out_q
+        span = float(np.max(np.abs(delta)))
+        if span == 0.0:
+            return True
+        frac = min(1.0, self.max_step / span)
+        cand = target.copy() if frac >= 1.0 else self.out_q + delta * frac
+        q_new, status = self.checker.advance(self.out_q, cand)
+        if status == BLOCKED:
+            self.blocked = True
+            self.waypoints.clear()
+            self.stats.blocked += 1
+        # страховка от численных хвостов: шаг строго в пределах и не больше max_step
+        q_new = np.clip(q_new, Q_MIN, Q_MAX)
+        q_new = self.out_q + np.clip(q_new - self.out_q, -self.max_step, self.max_step)
+        self.out_q = q_new
+        self._remember(self.out_q)
+        return np.array_equal(self.out_q, target)
+
     def step(self, now):
         """Следующая выходная команда (или None, если безопасная поза ещё неизвестна)."""
         if self.out_q is None:
             return None
-        at_goal = True
-        if not self.blocked and not np.array_equal(self.out_q, self.goal):
-            delta = self.goal - self.out_q
-            span = float(np.max(np.abs(delta)))
-            frac = min(1.0, self.max_step / span)
-            cand = self.goal.copy() if frac >= 1.0 else self.out_q + delta * frac
-            q_new, status = self.checker.advance(self.out_q, cand)
-            if status == BLOCKED:
-                self.blocked = True
-                self.stats.blocked += 1
-            # страховка от численных хвостов: шаг строго в пределах и не больше max_step
-            q_new = np.clip(q_new, Q_MIN, Q_MAX)
-            q_new = self.out_q + np.clip(q_new - self.out_q, -self.max_step, self.max_step)
-            self.out_q = q_new
-            at_goal = np.array_equal(self.out_q, self.goal)
+        if self.search is not None:
+            self._continue_search(self.budget_tick, now)
+        if self.search is None and not self.blocked:  # пока идёт поиск пути — стоим на месте
+            if self.waypoints:
+                if self._move_toward(self.waypoints[0]):
+                    self.waypoints.popleft()
+            elif not np.array_equal(self.out_q, self.goal):
+                self._move_toward(self.goal)
+        at_goal = self.search is None and not self.waypoints and np.array_equal(self.out_q, self.goal)
         hold = self.holding(now)
         if hold:
             kp, kd = self._hold_gains()
@@ -160,6 +317,6 @@ class SafetyCore:
         else:
             kp, kd = self.cmd['kp'].copy(), self.cmd['kd'].copy()
             tau = self.cmd['tau'].copy()
-            # целевая скорость имеет смысл только у цели; во время рампы/остановки у препятствия — 0
+            # целевая скорость имеет смысл только у цели; во время рампы/отхода/поиска — 0
             dq = self.cmd['dq'].copy() if at_goal else np.zeros(N_MOTORS)
         return Output(q=self.out_q.copy(), dq=dq, kp=kp, kd=kd, tau=tau, holding=hold)

@@ -98,7 +98,7 @@ class CollisionChecker:
         thr = self.threshold if threshold is None else threshold
         return self.min_dist(q) > -thr
 
-    def advance(self, qa, qb):
+    def advance(self, qa, qb, max_evals=None):
         """Идём по прямой из qa в qb, пока это доказуемо безопасно.
 
         Возвращает (q, status): DONE — дошли до qb; PARTIAL — исчерпан бюджет вычислений, продолжим в следующем такте;
@@ -117,7 +117,7 @@ class CollisionChecker:
         if d < -self.threshold:
             return q, BLOCKED                         # старт уже небезопасен — не двигаемся
         min_ds = 1e-6 / span                          # < 0.00006° по максимальному суставу — считаем, что упёрлись
-        for _ in range(self.max_evals):
+        for _ in range(self.max_evals if max_evals is None else max(1, int(max_evals))):
             ds = (d + self.threshold) / L if L > 0 else 1.0
             if ds < min_ds:
                 return q, BLOCKED
@@ -130,6 +130,21 @@ class CollisionChecker:
             if s >= 1.0:
                 return qb.copy(), DONE
         return q, PARTIAL
+
+    def path_clear(self, qa, qb, budget=3000):
+        """Весь прямой путь qa → qb проходим (проникновение ≤ threshold везде, в qb ≤ stop_threshold)?
+        Возвращает True / False, или None, если бюджет вычислений исчерпан (считаем «не доказано» = нельзя)."""
+        start = self.evals
+        q = np.asarray(qa, dtype=float)
+        qb = np.asarray(qb, dtype=float)
+        while True:
+            q, status = self.advance(q, qb)
+            if status == DONE:
+                return True
+            if status == BLOCKED:
+                return False
+            if self.evals - start >= budget:
+                return None
 
     def sampled_max_penetration(self, qa, qb, step_rad=math.radians(0.1), model_margin=None):
         """Эталонная проверка как у Judge: точки через ≤ step_rad по максимальному суставу, включая концы.
