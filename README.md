@@ -89,6 +89,30 @@ python3 run_local.py --task T2 --sim-image "$SIM_IMAGE" --participant-image go1-
 Переменные `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`, `ROS_LOCALHOST_ONLY` задаёт запускатель
 организаторов; образ их не перезаписывает.
 
+## Сдача
+
+Порядок по «Инструкции по подготовке и сдаче решения» организаторов. Сдаёт капитан.
+
+1. **Проверить версию** в рабочем репозитории: `docker build ...`, `tests/check_t1.sh go1-solution:dev` — «ИТОГ T1: OK»;
+   для каждого задания из `supported_tasks` — его проверки (для T2: unit-тесты, `tools/run_judge_docker.sh`,
+   `tools/run_with_organizers_sim.sh` — 12/12).
+2. **Опубликовать исходники** этой версии в публичный репозиторий (решение капитана): `git push public main`.
+   Публичную историю после сдачи не переписывать — каждая новая версия = новый коммит.
+3. **Войти в Harbor** (капитан вводит учётку команды сам, в репозитории и скриптах пароли не хранятся):
+   `docker login registry.cookcloud.ru`
+4. **Опубликовать образ** одной командой из чистой рабочей папки на нужном коммите:
+   ```bash
+   tools/publish.sh <имя_команды_в_Harbor>
+   ```
+   Скрипт откажется, если рабочая папка не чистая, коммит ещё не в `public` или нет входа в Harbor. Иначе он соберёт
+   образ из этого коммита (`git archive` → `docker build`, linux/amd64, без аттестаций), отправит
+   `registry.cookcloud.ru/go1-hackathon-remote-stage-<команда>/<команда>:<короткий хэш>`, получит digest, удалит
+   локальный образ, скачает его заново по digest, сверит ID и метку коммита и прогонит `tests/check_t1.sh`.
+5. **Заполнить личный кабинет** строками, которые печатает скрипт (копия — в `~/go1-submissions.log`):
+   - GitHub (конкретный коммит): `https://github.com/bylba0/go1-solution/commit/<полный SHA>`
+   - Команда загрузки образа: `docker pull --platform linux/amd64 registry.cookcloud.ru/go1-hackathon-remote-stage-<команда>/<команда>@sha256:<digest>`
+6. Открыть ссылку на коммит в браузере и убедиться, что она открывается.
+
 ## Лицензии
 
 Код — MIT (`LICENSE`). Модель Unitree Go1 (MuJoCo Menagerie) — BSD-3-Clause, `models/unitree_go1/LICENSE`.
