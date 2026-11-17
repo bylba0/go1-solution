@@ -76,11 +76,11 @@ CYCLES = 50
 CYCLE_DANGER, CYCLE_SAFE = 0.35, 1.0                  # с sim: случайная (часто опасная) цель → безопасная рядом с home
 
 
-def build_cycles(jc, seed=2026):
+def build_cycles(jc, n=CYCLES, seed=2026):
     """Ловушка из ревью: случайная цель в пределах ТЗ (часто опасная) → безопасная поза рядом с home."""
     rng = np.random.default_rng(seed)
     out = []
-    for _ in range(CYCLES):
+    for _ in range(n):
         danger = rng.uniform(Q_MIN, Q_MAX)
         while True:
             safe = np.clip(HOME + rng.uniform(-0.15, 0.15, 12), Q_MIN + 0.011, Q_MAX - 0.011)
@@ -90,7 +90,7 @@ def build_cycles(jc, seed=2026):
     return out
 
 
-def build_scenario(collide_q, cycles):
+def build_scenario(collide_q, cycles, demo=False):
     """Список фаз: (имя, длительность sim, функция t_rel → (q12 | None, поле_с_NaN | None))."""
     jump = HOME.copy()
     jump[1] += 30 * DEG
@@ -107,7 +107,7 @@ def build_scenario(collide_q, cycles):
     def sine(t):
         return HOME + np.array([0.08, 0.25, -0.3] * 4) * math.sin(2 * math.pi * 0.5 * t)
 
-    return [
+    phases = [
         ('старт', 2.0, lambda t: (None, None)),
         ('безопасная траектория', 7.0, lambda t: (sine(t), None)),
         ('выход за пределы', 1.5, lambda t: (out_of_range, None)),
@@ -122,6 +122,30 @@ def build_scenario(collide_q, cycles):
         ('потеря входа', 1.5, lambda t: (None, None)),
         ('возобновление', 1.5, lambda t: (HOME + np.array([0.0, 0.15, -0.15] * 4), None)),
     ]
+    if demo:
+        order = ['старт', 'безопасная траектория', 'скачок 30°', 'домой 2', 'поза с самоколлизией',
+                 'домой после коллизии', 'NaN/Inf', 'потеря входа', 'возобновление', 'выход за пределы', 'домой',
+                 f'опасная → безопасная ×{len(cycles)}', 'домой 3']
+        by = {p[0]: p for p in phases}
+        phases = [by[n] for n in order]
+    return phases
+
+
+PHASE_INFO = {
+    'старт': 'Safety Block держит стартовую позу (команд ещё нет)',
+    'безопасная траектория': 'плавные «приседания» 0.5 Гц — блок пропускает команды без искажений',
+    'выход за пределы': 'цели за пределами суставов — блок ограничивает их пределами ТЗ (ноги в крайних положениях)',
+    'домой': 'возврат в стойку',
+    'домой 2': 'возврат в стойку',
+    'домой 3': 'возврат в стойку',
+    'скачок 30°': 'резкий скачок цели на 30° — блок разбивает его на шаги ≤ 4.5° (быстрое, но не мгновенное движение)',
+    'поза с самоколлизией': 'цель с самопересечением ног — блок отклоняет её, робот не двигается',
+    'домой после коллизии': 'безопасная команда после опасной — отрабатывается',
+    'NaN/Inf': 'команды с NaN/Inf — отклоняются целиком, робот не двигается',
+    'потеря входа': 'команды перестали приходить — через 0.3 с удержание последней цели (dq=0, tau=0)',
+    'возобновление': 'команды снова идут — небольшое движение',
+    'опасная → безопасная': 'чередование случайных (часто опасных) и безопасных целей рядом со стойкой',
+}
 
 
 class Judge(Node):
@@ -194,8 +218,8 @@ class Judge(Node):
 def run(args):
     jc = JudgeCollision(args.model)
     collide_q = jc.find_colliding()
-    cycles = build_cycles(jc)
-    phases = build_scenario(collide_q, cycles)
+    cycles = build_cycles(jc, args.cycles)
+    phases = build_scenario(collide_q, cycles, demo=args.demo)
     rclpy.init()
     j = Judge(args)
     total = sum(p[1] for p in phases)
@@ -215,6 +239,7 @@ def run(args):
         j.ext_t0 = j.ext_clock
         j.sim_t = 0.0
     w0 = time.monotonic()
+    shown = [None]
     next_clock = next_state = 0.0
     next_cmd_w = 0.0
     while True:
@@ -234,6 +259,9 @@ def run(args):
             next_cmd_w += 1.0 / args.cmd_rate
             for (name, a, b), (_, _, fn) in zip(bounds, phases):
                 if a <= now < b:
+                    if args.announce and name != shown[0]:
+                        shown[0] = name
+                        print(f'▶ {now:6.1f} с  {name}: {PHASE_INFO.get(name.split(" ×")[0], "")}', flush=True)
                     q, bad = fn(now - a)
                     if q is not None:
                         j.publish_cmd(q, bad == 'bad')
@@ -406,6 +434,10 @@ def main():
     ap.add_argument('--model', default='/opt/go1/models/unitree_go1/go1.xml')
     ap.add_argument('--cmd-rate', type=float, default=100.0)
     ap.add_argument('--json', default='')
+    ap.add_argument('--cycles', type=int, default=CYCLES, help='циклов «опасная → безопасная» (по умолчанию 50)')
+    ap.add_argument('--demo', action='store_true',
+                    help='порядок фаз для наглядности: опасные позы, от которых робот может упасть, — в конце')
+    ap.add_argument('--announce', action='store_true', help='печатать начало каждой фазы')
     ap.add_argument('--external-sim', action='store_true',
                     help='не публиковать /clock и /lowstate: время и состояние — от настоящего симулятора организаторов')
     args = ap.parse_args()

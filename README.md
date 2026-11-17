@@ -64,6 +64,8 @@ docker run --rm --network none --mount type=bind,src=$PWD/src/go1_safety,dst=/sr
 tools/run_judge_docker.sh go1-solution:dev                 # CMD_RATE=500 — частый вход; CPUS=1.0 — лимит CPU решения
 # то же на настоящем MuJoCo-симуляторе организаторов (run_local.py + judge_sim --external-sim)
 tools/run_with_organizers_sim.sh go1-solution:dev
+# живая демонстрация с окном MuJoCo (нужен X11/WSLg): фазы печатаются в консоль, в конце — таблица баллов
+tools/live_demo.sh go1-solution:dev
 ```
 `judge_sim` — не официальный Judge: сценарии (безопасная траектория, выход за пределы, скачок 30°, поза с самоколлизией,
 NaN/Inf, обрыв входа) и пороги взяты из текста ТЗ_T2; коллизии проверяются независимо (исходный go1.xml, шаг 0.1°, > 1 мм).
