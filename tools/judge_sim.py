@@ -295,7 +295,9 @@ def evaluate(rec, bounds, jc, collide_q, cycles):
     max_gap = float(gaps.max())
     min_win = min(((t >= s) & (t < s + 5.0)).sum() / 5.0 for s in np.arange(a, t[-1] - 5.0, 0.5))
     ok1 = rate >= 50 and max_gap <= 0.1 and min_win >= 50
-    res[1] = (ok1, 3, f'{rate:.0f} Гц в окне 5 с, мин. по скользящим окнам {min_win:.0f} Гц, макс. пауза {max_gap * 1000:.0f} мс')
+    mean_rate = (after.size - 1) / float(after[-1] - after[0]) if after.size > 1 else 0.0
+    res[1] = (ok1, 3, f'{rate:.0f} Гц в окне 5 с, средн. {mean_rate:.0f} Гц, мин. по скользящим окнам {min_win:.0f} Гц, '
+              f'макс. пауза {max_gap * 1000:.0f} мс')
 
     # 5. NaN/Inf во всех 20 моторах и всех полях
     nonfinite = sum(int(not np.all(np.isfinite(r[1][f]))) for r in rec for f in FIELDS)

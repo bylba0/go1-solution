@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Прогон T2 в Docker: контейнер решения (`/entrypoint.sh T2`, как у организаторов: --network host, их inline-XML CycloneDDS)
 # + соседний контейнер с tools/judge_sim.py. Печатает таблицу баллов и нагрузку CPU контейнера решения.
-# Использование: tools/run_judge_docker.sh [IMAGE] ; CMD_RATE=100 FORCE_T2=1
+# Использование: tools/run_judge_docker.sh [IMAGE] ; CMD_RATE=100 FORCE_T2=1 CPUS=0.5
+#   CPUS — ограничение CPU контейнера решения (docker --cpus), имитирует слабое железо; пусто — без ограничения.
 #   FORCE_T2=1 (по умолчанию) — подменяет манифест на {"supported_tasks":["T2"]} через GO1_MANIFEST, чтобы проверить T2
 #   до того, как он заявлен в solution_manifest.json; FORCE_T2=0 — запуск как есть.
 set -uo pipefail
 IMAGE="${1:-go1-solution:dev}"
 CMD_RATE="${CMD_RATE:-100}"
 FORCE_T2="${FORCE_T2:-1}"
+CPUS="${CPUS:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOMAIN=$((100 + RANDOM % 130))
 PART="go1-t2-participant-$$"
@@ -21,13 +23,14 @@ cleanup() { docker rm -f "$PART" "$JUDGE" >/dev/null 2>&1; [[ -n "${STATS_PID:-}
 trap cleanup EXIT
 
 EXTRA=()
+[[ -n "$CPUS" ]] && EXTRA+=(--cpus "$CPUS")
 if [[ "$FORCE_T2" == "1" ]]; then
   echo '{"protocol_version":"1.0","supported_tasks":["T2"],"self_trained_rl":false,"preferred_speed_mps":null}' > "$OUT/manifest.json"
   chmod 644 "$OUT/manifest.json"
-  EXTRA=(--mount "type=bind,src=$OUT/manifest.json,dst=/tmp/manifest.json,readonly" --env GO1_MANIFEST=/tmp/manifest.json)
+  EXTRA+=(--mount "type=bind,src=$OUT/manifest.json,dst=/tmp/manifest.json,readonly" --env GO1_MANIFEST=/tmp/manifest.json)
 fi
 
-echo "== T2 judge_sim: образ $IMAGE, ROS_DOMAIN_ID=$DOMAIN, вход $CMD_RATE Гц"
+echo "== T2 judge_sim: образ $IMAGE, ROS_DOMAIN_ID=$DOMAIN, вход $CMD_RATE Гц, CPU решения: ${CPUS:-без ограничения}"
 docker create --name "$PART" --platform linux/amd64 --pull never --network host "${ENV[@]}" "${EXTRA[@]}" \
   --entrypoint /entrypoint.sh "$IMAGE" T2 >/dev/null
 docker start "$PART" >/dev/null
