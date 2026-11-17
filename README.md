@@ -21,9 +21,12 @@
 |---|---|---|
 | [bylba0/go1-solution](https://github.com/bylba0/go1-solution) | публичный | только версии **для сдачи**: каждый коммит соответствует образу, отправленному организаторам по SHA-256 digest |
 | `bylba0/go1-solution-dev` | приватный | рабочий репозиторий команды: весь текущий прогресс, пушится после каждого рабочего шага |
+| `bylba0/go1-solution-personal` | приватный | личная копия капитана: только содержимое go1-solution-dev, без доступа команды; обновляется только по команде капитана |
 
-В локальной копии: remote `dev` → go1-solution-dev (по умолчанию для работы), remote `public` → go1-solution.
+В локальной копии капитана: remote `dev` → go1-solution-dev (по умолчанию для работы), remote `public` → go1-solution,
+remote `personal` → go1-solution-personal.
 В `public` пушим только по решению капитана, когда готова новая версия для сдачи (`git push public main`).
+В `personal` — только по команде капитана: `git push personal --all` и теги, которые есть в dev (личные `backup/*` — не пушим).
 
 ## Сборка
 
