@@ -61,7 +61,7 @@ tests/check_t1.sh go1-solution:dev
 docker run --rm --network none --mount type=bind,src=$PWD/src/go1_safety,dst=/src,readonly --entrypoint bash \
   go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
 # имитатор Judge: /entrypoint.sh T2 + judge_sim.py в соседнем контейнере, таблица баллов ТЗ_T2
-tools/run_judge_docker.sh go1-solution:dev                 # CMD_RATE=500 — частый вход
+tools/run_judge_docker.sh go1-solution:dev                 # CMD_RATE=500 — частый вход; CPUS=1.0 — лимит CPU решения
 # то же на настоящем MuJoCo-симуляторе организаторов (run_local.py + judge_sim --external-sim)
 tools/run_with_organizers_sim.sh go1-solution:dev
 ```

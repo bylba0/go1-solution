@@ -276,7 +276,8 @@ def test_path_check_cost(checker):
         run(c, k * 1.0, k * 1.0 + 0.6)
     print(f'\nпроверка пути новой цели: средн. {1e3 * np.mean(costs):.2f} мс, p95 {1e3 * np.percentile(costs, 95):.2f} мс, '
           f'макс {1e3 * np.max(costs):.2f} мс; вычислений средн. {np.mean(evals):.0f}, макс {np.max(evals)}')
-    assert np.max(evals) <= c.budget_now + 10    # + проверка самой цели и стартовых точек
+    # бюджет по времени: порция ≈ budget_now_s (+ один кусок вычислений); с запасом на медленную машину
+    assert np.percentile(costs, 95) <= c.budget_now_s + 0.004
 
 
 @pytest.mark.parametrize('field', ['q', 'dq', 'kp', 'kd', 'tau'])

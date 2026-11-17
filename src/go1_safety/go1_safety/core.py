@@ -3,6 +3,7 @@
 Порядок моторов Unitree: 0..2 FR (hip, thigh, calf), 3..5 FL, 6..8 RR, 9..11 RL; в LowCmd 20 слотов, используются 0..11.
 """
 import math
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -32,9 +33,11 @@ HOLD_KP_MIN = 5.0                                 # «удерживать» с 
 INPUT_TIMEOUT = 0.3                               # с sim time (ТЗ: ≤ 0.5 с)
 HOME_Q = np.array([0.0, 0.9, -1.8] * 4)           # keyframe 'home' go1.xml
 HISTORY_LEN = 4000                                # поз в истории (сжатой: отрезки ≤ шага, проверенные)
-SEARCH_BUDGET_NOW = 300                           # вычислений коллизий сразу при новой цели (≈ 5–9 мс)
-SEARCH_BUDGET_TICK = 250                          # на каждом следующем такте, пока поиск пути не закончен
-SEARCH_BUDGET_TOTAL = 20000                       # всего на одну цель (≈ 0.4–0.6 с), дальше — отказ
+# Бюджеты по ВРЕМЕНИ (не числу вычислений): на медленном CPU порция не растягивается, публикация не ждёт.
+SEARCH_BUDGET_NOW_S = 0.0012                      # с: сразу при новой цели
+SEARCH_BUDGET_TICK_S = 0.0012                     # с: на каждой следующей порции, пока поиск пути не закончен
+SEARCH_BUDGET_TOTAL = 20000                       # вычислений всего на одну цель (≈ 0.4–0.6 с CPU), дальше — отказ
+EVAL_CHUNK = 8                                    # вычислений между проверками часов
 RETREAT_CANDIDATES = 40                           # сколько точек истории пробуем как начало обходного пути
 REPLAN_PERIOD = 0.2                               # с sim: та же отклонённая цель перепроверяется не чаще
 
@@ -86,8 +89,8 @@ class PathSearch:
         self.evals = 0
         self.ticks = 0
 
-    def run(self, budget):
-        """('found', k) | ('fail', None) | ('pending', None)."""
+    def run(self, deadline):
+        """Работает до deadline (time.perf_counter). ('found', k) | ('fail', None) | ('pending', None)."""
         ch = self.checker
         e0 = ch.evals
         self.ticks += 1
@@ -96,10 +99,9 @@ class PathSearch:
                 if self.pos is None:
                     self.pos = self.starts[self.i][1].copy()
                 while True:
-                    left = budget - (ch.evals - e0)
-                    if left <= 0:
+                    if time.perf_counter() >= deadline:
                         return 'pending', None
-                    q, st = ch.advance(self.pos, self.goal, max_evals=left)
+                    q, st = ch.advance(self.pos, self.goal, max_evals=EVAL_CHUNK)
                     self.pos = q
                     if st == DONE:
                         return 'found', self.starts[self.i][0]
@@ -121,16 +123,17 @@ class SafetyCore:
       3) перекрыт — страховка: ищем точку истории опубликованных поз, из которой прямой путь к цели свободен,
          отходим к ней назад по истории (каждый отрезок уже проверен) и идём к цели;
       4) не нашли — отказ: держим последнюю принятую цель.
-    Поиск пошаговый: сразу SEARCH_BUDGET_NOW вычислений, затем по SEARCH_BUDGET_TICK за такт; пока он идёт,
+    Поиск пошаговый, бюджет по времени: сразу SEARCH_BUDGET_NOW_S, затем по SEARCH_BUDGET_TICK_S за порцию; пока он идёт,
     выход стоит на месте и публикуется без пауз. Так блок не застревает у препятствия и не затягивает такт.
     """
 
     def __init__(self, checker, max_step=MAX_STEP_RAD, input_timeout=INPUT_TIMEOUT, history_len=HISTORY_LEN,
-                 budget_now=SEARCH_BUDGET_NOW, budget_tick=SEARCH_BUDGET_TICK, budget_total=SEARCH_BUDGET_TOTAL):
+                 budget_now_s=SEARCH_BUDGET_NOW_S, budget_tick_s=SEARCH_BUDGET_TICK_S, budget_total=SEARCH_BUDGET_TOTAL):
         self.checker = checker
         self.max_step = float(max_step)
         self.input_timeout = float(input_timeout)
-        self.budget_now, self.budget_tick, self.budget_total = int(budget_now), int(budget_tick), int(budget_total)
+        self.budget_now_s, self.budget_tick_s = float(budget_now_s), float(budget_tick_s)
+        self.budget_total = int(budget_total)
         self.out_q = None            # последняя опубликованная цель (12)
         self.goal = None             # последняя принятая (клипованная, достижимая) цель
         self.cmd = None              # последние принятые dq/kp/kd/tau (клипованные), dict
@@ -164,19 +167,21 @@ class SafetyCore:
             self._init_pose(q_measured)
 
     # ------------------------------------------------------------------ история опубликованных поз
-    def _remember(self, q):
-        """Сжатая история: соседние записи соединены проверенным прямым отрезком длиной ≤ max_step."""
+    def _remember(self, q, deadline=None):
+        """Сжатая история: соседние записи соединены проверенным прямым отрезком длиной ≤ max_step.
+        Нет времени на проверку сжатия — просто добавляем (это всегда безопасно)."""
         h = self.history
         if h and np.array_equal(h[-1], q):
             return
         if len(h) >= 2 and float(np.max(np.abs(q - h[-2]))) <= self.max_step \
-                and self.checker.path_clear(h[-2], q, budget=50) is True:
+                and (deadline is None or time.perf_counter() < deadline) \
+                and self.checker.path_clear(h[-2], q, budget=20) is True:
             h[-1] = q.copy()
         else:
             h.append(q.copy())
 
     # ------------------------------------------------------------------ поиск пути
-    def _start_search(self, goal, cmd, now):
+    def _start_search(self, goal, cmd, now, deadline):
         hist = list(self.history)
         n = len(hist)
         starts = [(-1, self.out_q.copy())]
@@ -189,11 +194,11 @@ class SafetyCore:
         self.search = PathSearch(self.checker, goal, starts)
         self.search_cmd = cmd
         self.search_hist = hist
-        return self._continue_search(self.budget_now, now)
+        return self._continue_search(deadline, now)
 
-    def _continue_search(self, budget, now):
+    def _continue_search(self, deadline, now):
         s = self.search
-        res, k = s.run(budget)
+        res, k = s.run(deadline)
         if res == 'pending' and s.evals < self.budget_total:
             return 'pending'
         self.stats.path_evals_max = max(self.stats.path_evals_max, s.evals)
@@ -218,7 +223,7 @@ class SafetyCore:
         self.stats.rejected_collision += 1
 
     # ------------------------------------------------------------------ вход
-    def on_command(self, fields, now):
+    def on_command(self, fields, now, deadline=None):
         """fields: dict массивов длины 20 (q, dq, kp, kd, tau).
         Возвращает True — команда принята (или ждёт окончания поиска пути), False — отклонена."""
         try:
@@ -257,7 +262,9 @@ class SafetyCore:
             if self.checker.min_dist(goal) < -self.checker.stop_threshold:
                 self._reject(goal, now)              # сама цель в коллизии — отказ целиком
                 return False
-            if self._start_search(goal, cmd, now) == 'fail':
+            if deadline is None:
+                deadline = time.perf_counter() + self.budget_now_s
+            if self._start_search(goal, cmd, now, deadline) == 'fail':
                 return False
         self.last_input_t = now
         self.stats.accepted += 1
@@ -276,38 +283,50 @@ class SafetyCore:
             return kp, kd
         return np.full(N_MOTORS, HOLD_KP), np.full(N_MOTORS, HOLD_KD)
 
-    def _move_toward(self, target):
-        """Шаг ≤ max_step по прямой к target с проверкой отрезка; возвращает True, если дошли."""
+    def _move_toward(self, target, deadline):
+        """Шаг ≤ max_step по прямой к target с проверкой отрезка (порциями до deadline); True — дошли."""
         delta = target - self.out_q
         span = float(np.max(np.abs(delta)))
         if span == 0.0:
             return True
         frac = min(1.0, self.max_step / span)
         cand = target.copy() if frac >= 1.0 else self.out_q + delta * frac
-        q_new, status = self.checker.advance(self.out_q, cand)
+        q = self.out_q
+        while True:
+            q, status = self.checker.advance(q, cand, max_evals=EVAL_CHUNK)
+            if status != 'partial' or time.perf_counter() >= deadline:
+                break                                  # не успели — публикуем уже проверенную часть отрезка
         if status == BLOCKED:
             self.blocked = True
             self.waypoints.clear()
             self.stats.blocked += 1
         # страховка от численных хвостов: шаг строго в пределах и не больше max_step
-        q_new = np.clip(q_new, Q_MIN, Q_MAX)
+        q_new = np.clip(q, Q_MIN, Q_MAX)
         q_new = self.out_q + np.clip(q_new - self.out_q, -self.max_step, self.max_step)
         self.out_q = q_new
-        self._remember(self.out_q)
+        self._remember(self.out_q, deadline)
         return np.array_equal(self.out_q, target)
 
-    def step(self, now):
-        """Следующая выходная команда (или None, если безопасная поза ещё неизвестна)."""
+    def think(self, now, deadline):
+        """Только продвинуть незаконченный поиск пути (без движения выхода) — когда предыдущая поза ещё не опубликована."""
+        if self.search is not None:
+            self._continue_search(deadline, now)
+
+    def step(self, now, deadline=None):
+        """Следующая выходная команда (или None, если безопасная поза ещё неизвестна).
+        deadline (time.perf_counter) ограничивает вычисления этой порции."""
         if self.out_q is None:
             return None
+        if deadline is None:
+            deadline = time.perf_counter() + self.budget_tick_s
         if self.search is not None:
-            self._continue_search(self.budget_tick, now)
+            self._continue_search(deadline, now)
         if self.search is None and not self.blocked:  # пока идёт поиск пути — стоим на месте
             if self.waypoints:
-                if self._move_toward(self.waypoints[0]):
+                if self._move_toward(self.waypoints[0], deadline):
                     self.waypoints.popleft()
             elif not np.array_equal(self.out_q, self.goal):
-                self._move_toward(self.goal)
+                self._move_toward(self.goal, deadline)
         at_goal = self.search is None and not self.waypoints and np.array_equal(self.out_q, self.goal)
         hold = self.holding(now)
         if hold:
