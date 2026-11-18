@@ -2,6 +2,8 @@
 # /entrypoint.sh — контракт запуска Hackathon Go1 (ТЗ_T1, разделы 3.2–3.3).
 #   ping      — без ROS: печатает в stdout ровно один JSON из манифеста и выходит с кодом 0 (≤ 10 с).
 #   T2..T5    — запуск ROS 2-узлов задания (use_sim_time:=true) до остановки контейнера (TERM → SIGINT для launch).
+#   check [clock_wait_s=30] [topic_wait_s=5] — диагностика связи с симулятором: один JSON в stdout,
+#               код 0 — /clock пришёл, 1 — нет, 2 — неверные аргументы.
 #               Задание, которого нет в supported_tasks манифеста, запускает заглушку (пустой узел).
 #   иначе     — сообщение в stderr, код 2.
 # Всё диагностическое — только в stderr. ROS_DOMAIN_ID, RMW_IMPLEMENTATION, CYCLONEDDS_URI, ROS_LOCALHOST_ONLY
@@ -63,7 +65,9 @@ source_ros() {
 run_launch() {
   # set -m: без управления заданиями bash запускает фоновый процесс с ИГНОРИРУЕМЫМ SIGINT (SigIgn) — launch бы его не услышал
   set -m
-  ros2 launch "$@" &
+  # --noninteractive: без терминала; sigterm/sigkill_timeout: launch по SIGINT ждёт узлы 1.5 с, затем SIGTERM, ещё 0.5 с —
+  # SIGKILL, так что остановка укладывается в «docker stop --time 5» организаторов.
+  ros2 launch --noninteractive "$@" sigterm_timeout:=1.5 sigkill_timeout:=0.5 &
   local child=$!
   trap 'log "сигнал остановки → SIGINT для ros2 launch"; kill -INT "$child" 2>/dev/null' TERM INT
   local rc=0
@@ -89,8 +93,12 @@ case "${1:-}" in
       run_launch go1_bringup idle.launch.py task:="$TASK" use_sim_time:=true
     fi
     ;;
+  check)
+    source_ros
+    exec python3 /opt/go1/check_link.py "${@:2}"
+    ;;
   *)
-    log "неизвестный аргумент: '${1:-}'. Использование: /entrypoint.sh ping|T2|T3|T4|T5"
+    log "неизвестный аргумент: '${1:-}'. Использование: /entrypoint.sh ping|T2|T3|T4|T5|check [clock_wait_s] [topic_wait_s]"
     exit 2
     ;;
 esac

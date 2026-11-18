@@ -83,11 +83,25 @@ python3 run_local.py --task T2 --sim-image "$SIM_IMAGE" --participant-image go1-
 | Аргумент | Поведение |
 |---|---|
 | `ping` | без ROS; stdout — один JSON `{"protocol_version":"1.0","supported_tasks":[...],"self_trained_rl":false,"preferred_speed_mps":null}`, код 0 |
-| `T2`..`T5` | `ros2 launch go1_bringup tN.launch.py use_sim_time:=true`; незаявленное задание — узел-заглушка |
+| `T2`..`T5` | `ros2 launch --noninteractive go1_bringup tN.launch.py use_sim_time:=true` (остановка: TERM → SIGINT, узлам 1.5 с до SIGTERM и ещё 0.5 с до SIGKILL); незаявленное задание — узел-заглушка |
+| `check [clock_wait_s=30] [topic_wait_s=5]` | диагностика связи с симулятором (не для испытаний): один JSON в stdout, код 0 — `/clock` пришёл, 1 — нет, 2 — неверные аргументы |
 | другое | сообщение в stderr, код 2 |
 
 Переменные `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`, `ROS_LOCALHOST_ONLY` задаёт запускатель
 организаторов; образ их не перезаписывает.
+
+**Режим `check`** — быстро понять, видит ли контейнер симулятор: ждёт `/clock` до `clock_wait_s` секунд, затем до
+`topic_wait_s` — по сообщению из `/lowstate`, `/imu/data`, `/scan` (тех, у кого есть издатели), и печатает JSON:
+RMW, домен, пришёл ли `/clock` и через сколько секунд, sim time, какие топики получены, список чужих топиков с числом
+издателей/подписчиков. Пример (при запущенном симуляторе, в его домене):
+```bash
+docker run --rm --network host -e ROS_DOMAIN_ID=<домен сима> -e CYCLONEDDS_URI="$(cat <cyclonedds_local.xml>)" \
+  go1-solution:dev check 20 5
+```
+
+При сборке образ проверяет манифест (`tools/validate_manifest.py`): ровно 4 поля протокола, их типы, задания из T2..T5
+без повторов, `preferred_speed_mps` в [0.1, 0.6] только вместе с T3 и launch-файл `t<N>.launch.py` для каждого
+заявленного задания — иначе сборка падает.
 
 ## Сдача
 

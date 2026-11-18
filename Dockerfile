@@ -63,7 +63,12 @@ RUN cd /opt/go1/models/unitree_go1 && sha256sum -c --quiet SHA256SUMS \
     && python3 -c "import mujoco; m = mujoco.MjModel.from_xml_path('go1.xml'); assert m.nu == 12, m.nu"
 
 COPY solution_manifest.json /opt/go1/solution_manifest.json
+COPY tools/validate_manifest.py tools/check_link.py /opt/go1/
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+
+# Сборка падает, если манифест нарушает протокол ping (ровно 4 поля, типы, T2..T5 без повторов, скорость только с T3)
+# или у заявленного задания нет launch-файла go1_bringup/launch/t<N>.launch.py
+RUN python3 /opt/go1/validate_manifest.py /opt/go1/solution_manifest.json /opt/go1_ws/install/share/go1_bringup/launch
 
 # Проверки на этапе сборки: типы unitree_go, манифест, ping без ROS
 RUN source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash \

@@ -7,7 +7,8 @@
 #      с полями нужных типов, без лишнего текста; диагностика только в stderr;
 #   3. неизвестный аргумент → ненулевой код;
 #   4. T2 с --network none и окружением как у запускателя (ROS_DOMAIN_ID, RMW, inline CYCLONEDDS_URI)
-#      стартует и живёт ≥ ALIVE_SEC секунд.
+#      стартует и живёт ≥ ALIVE_SEC секунд;
+#   5. остановка: T2 без сети, через 5 с «docker stop -t 10» — завершение < 5 с, код выхода ≠ 137 (не SIGKILL).
 # Использование: tests/check_t1.sh [IMAGE] ; RUNS=3 ALIVE_SEC=12
 set -uo pipefail
 
@@ -115,6 +116,26 @@ t0="$(now)"; docker stop --time 5 "$NAME" >/dev/null; t1="$(now)"
 dstop="$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")"; code="$(docker inspect "$NAME" --format '{{.State.ExitCode}}')"
 if (( $(echo "$dstop < 5" | bc) )); then ok "docker stop: ${dstop} с, код выхода $code (штатная остановка, без SIGKILL)"
 else fail "docker stop: ${dstop} с — контейнер не завершился по SIGTERM (добит SIGKILL)"; fi
+
+# 5. Остановка с запасом: T2 без сети, через 5 с «docker stop -t 10» — завершиться быстрее 5 с и не SIGKILL (код ≠ 137).
+#    -t 10 больше 5 с: если узлы не гасятся по SIGTERM, Docker ждал бы до 10 с и добил бы SIGKILL — это и ловим.
+docker rm -f "$NAME" >/dev/null 2>&1
+docker create --name "$NAME" --platform linux/amd64 --pull never --network none \
+  --env ROS_DOMAIN_ID=152 --env RMW_IMPLEMENTATION=rmw_cyclonedds_cpp --env "CYCLONEDDS_URI=$CYCLONE_XML" \
+  --entrypoint /entrypoint.sh "$IMAGE" T2 >/dev/null
+docker start "$NAME" >/dev/null
+sleep 5
+if [[ "$(docker inspect "$NAME" --format '{{.State.Running}}')" != "true" ]]; then
+  fail "stop-тест: T2 завершился раньше 5 с (код $(docker inspect "$NAME" --format '{{.State.ExitCode}}'))"
+else
+  t0="$(now)"; docker stop -t 10 "$NAME" >/dev/null; t1="$(now)"
+  dstop="$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")"; code="$(docker inspect "$NAME" --format '{{.State.ExitCode}}')"
+  if (( $(echo "$dstop < 5" | bc) )) && [[ "$code" != "137" ]]; then
+    ok "stop -t 10 через 5 с: ${dstop} с, код выхода $code (не SIGKILL)"
+  else
+    fail "stop -t 10 через 5 с: ${dstop} с, код выхода $code (нужно < 5 с и код ≠ 137)"
+  fi
+fi
 
 echo
 if (( fails == 0 )); then echo "ИТОГ T1: OK"; else echo "ИТОГ T1: FAIL ($fails)"; exit 1; fi
