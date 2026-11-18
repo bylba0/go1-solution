@@ -1,38 +1,53 @@
 #!/usr/bin/env bash
 # Публикация решения в Harbor организаторов и подготовка строк для личного кабинета (Инструкция по сдаче решения).
-#   tools/publish.sh <команда>      # имя команды в Harbor, латиницей (как выдали организаторы)
+#   tools/publish.sh [--dry-run] <команда>     # имя команды (проекта) в Harbor, латиницей, как выдали организаторы
+# Адрес образа по умолчанию: registry.cookcloud.ru/<команда>/<команда>  (так у нашей команды: kafedra_problem/kafedra_problem;
+#   формат подтверждён организатором при сдаче T1, 18.11.2026). Шаблон из инструкции «go1-hackathon-remote-stage-<команда>/…»
+#   для нас НЕВЕРЕН. Другой адрес — переменной: HARBOR_REPO=registry.cookcloud.ru/<проект>/<репозиторий> tools/publish.sh <команда>
+# --dry-run: только шаг 1 (проверки + итоговый адрес), без сборки и push; отсутствие входа в Harbor — предупреждение, не ошибка.
 # Что делает (по шагам, при любой ошибке — остановка):
 #   1. проверки: чистая рабочая папка; текущий коммит уже есть в публичном репозитории (remote public);
-#      docker login в registry.cookcloud.ru уже выполнен (скрипт НЕ логинится и паролей не хранит);
-#   2. сборка образа из ТЕКУЩЕГО коммита (git archive → docker build, linux/amd64), тег
-#      registry.cookcloud.ru/go1-hackathon-remote-stage-<команда>/<команда>:<короткий хэш коммита>;
+#      docker login в реестр уже выполнен (скрипт НЕ логинится и паролей не хранит; логин/логаут — только владелец);
+#   2. сборка образа из ТЕКУЩЕГО коммита (git archive → docker build, linux/amd64), тег <адрес>:<короткий хэш коммита>;
 #   3. docker push, получение digest;
 #   4. удаление локального образа и повторная загрузка ПО DIGEST; сверка ID образа и метки коммита;
 #   5. tests/check_t1.sh на скачанном образе;
 #   6. печать строк для личного кабинета (+ копия в ~/go1-submissions.log).
 set -euo pipefail
 
-REGISTRY="registry.cookcloud.ru"
+DEFAULT_REGISTRY="registry.cookcloud.ru"
 PUBLIC_REMOTE="${PUBLIC_REMOTE:-public}"
 die() { echo "ОСТАНОВКА: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; shift; fi
 TEAM="${1:-}"
-[[ -n "$TEAM" ]] || die "укажите имя команды в Harbor: tools/publish.sh <команда>"
+[[ -n "$TEAM" ]] || die "укажите имя команды в Harbor: tools/publish.sh [--dry-run] <команда>"
 [[ "$TEAM" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]] || die "имя команды — латиница в нижнем регистре, цифры, . _ - (получено: '$TEAM')"
+
+# Адрес репозитория образа (без тега и digest)
+REPO="${HARBOR_REPO:-$DEFAULT_REGISTRY/$TEAM/$TEAM}"
+[[ "$REPO" =~ ^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$ ]] \
+  || die "HARBOR_REPO — адрес без тега, вида реестр/проект/репозиторий в нижнем регистре (получено: '$REPO')"
+[[ "$REPO" == */*/* ]] || die "адрес должен содержать реестр, проект и репозиторий: '$REPO'"
+REGISTRY="${REPO%%/*}"
 
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 REPO_ROOT="$PWD"
 
 # ---------------------------------------------------------------- 1. проверки
-step "1/6 Проверки"
+step "1/6 Проверки$([[ $DRY_RUN == 1 ]] && echo ' (dry-run: без сборки и push)')"
+echo "   адрес образа: $REPO$([[ -n "${HARBOR_REPO:-}" ]] && echo '  (из HARBOR_REPO)' || echo '  (по умолчанию: реестр/<команда>/<команда>)')"
 if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   git status --short | head -20
   die "рабочая папка не чистая — закоммитьте или уберите изменения (образ должен соответствовать коммиту)"
 fi
 COMMIT="$(git rev-parse HEAD)"
 SHORT="$(git rev-parse --short HEAD)"
+IMAGE="$REPO:$SHORT"
 echo "   коммит: $COMMIT ($(git log -1 --format=%s | cut -c1-70))"
+echo "   тег сборки: $IMAGE"
 
 git remote get-url "$PUBLIC_REMOTE" >/dev/null 2>&1 || die "нет remote '$PUBLIC_REMOTE' (публичный репозиторий)"
 git fetch -q "$PUBLIC_REMOTE" || die "не удалось получить $PUBLIC_REMOTE"
@@ -45,8 +60,9 @@ fi
 PUBLIC_URL="$(git remote get-url "$PUBLIC_REMOTE" | sed -E 's#^git@github.com:#https://github.com/#; s#\.git$##')"
 echo "   коммит есть в $PUBLIC_REMOTE/$PUBLIC_BRANCH ($PUBLIC_URL)"
 
-# docker login: только проверка (без ввода и хранения паролей)
-python3 - "$REGISTRY" <<'PY' || die "нет входа в $REGISTRY. Выполните сами: docker login $REGISTRY — и запустите снова"
+# docker login: только проверка наличия входа в $REGISTRY (без ввода и хранения паролей).
+# Читается конфиг Docker ($DOCKER_CONFIG или ~/.docker/config.json) — только ключи реестров, без вывода содержимого.
+if python3 - "$REGISTRY" <<'PY'
 import json, os, subprocess, sys
 reg = sys.argv[1]
 path = os.path.join(os.environ.get('DOCKER_CONFIG', os.path.expanduser('~/.docker')), 'config.json')
@@ -65,10 +81,20 @@ if helper:
 auths = cfg.get('auths') or {}
 sys.exit(0 if any(k in auths and (auths[k] or {}).get('auth') for k in keys) else 1)
 PY
-echo "   вход в $REGISTRY выполнен"
+then
+  echo "   вход в $REGISTRY выполнен"
+elif [[ $DRY_RUN == 1 ]]; then
+  echo "   ВНИМАНИЕ: входа в $REGISTRY нет — перед настоящей публикацией владелец выполняет: docker login $REGISTRY"
+else
+  die "нет входа в $REGISTRY. Выполните сами: docker login $REGISTRY — и запустите снова"
+fi
 
-REPO="$REGISTRY/go1-hackathon-remote-stage-$TEAM/$TEAM"
-IMAGE="$REPO:$SHORT"
+if [[ $DRY_RUN == 1 ]]; then
+  echo
+  echo "dry-run: проверки пройдены. Будет собран и отправлен $IMAGE; строка для кабинета:"
+  echo "  docker pull --platform linux/amd64 $REPO@sha256:<digest после push>"
+  exit 0
+fi
 
 # ---------------------------------------------------------------- 2. сборка из коммита
 step "2/6 Сборка $IMAGE из коммита $SHORT"
