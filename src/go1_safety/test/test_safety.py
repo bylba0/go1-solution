@@ -326,10 +326,30 @@ def test_hold_with_zero_kp_uses_default_gains(core):
 
 
 def test_gains_and_ff_clipped(core):
+    """Вне диапазонов организаторов (kp 0..1000, kd 0..100, tau ±100, dq ±20) — обрезается до границы."""
     run(core, 0.0, 0.1, cmd=make_cmd(HOME_Q, kp=1e6, kd=-5.0, dq=1e3, tau=1e3))
     o = core.step(0.1)
-    assert np.all(o.kp <= 100) and np.all(o.kd >= 0) and np.all(np.abs(o.dq) <= 20)
-    assert np.all(np.abs(o.tau) <= np.array([23.7, 23.7, 35.55] * 4) + 1e-9)
+    assert np.all(o.kp == 1000.0) and np.all(o.kd == 0.0) and np.all(o.dq == 20.0) and np.all(o.tau == 100.0)
+    run(core, 0.1, 0.2, cmd=make_cmd(HOME_Q, kp=-3.0, kd=250.0, dq=-1e3, tau=-1e3))
+    o = core.step(0.2)
+    assert np.all(o.kp == 0.0) and np.all(o.kd == 100.0) and np.all(o.dq == -20.0) and np.all(o.tau == -100.0)
+
+
+def test_in_range_command_passes_unchanged(core):
+    """Команда в допустимых диапазонах (kp 200, kd 20, tau 50, dq 10) выходит без изменений."""
+    q = HOME_Q + np.array([0.0, 0.05, -0.05] * 4)
+    run(core, 0.0, 0.2, cmd=make_cmd(q, kp=200.0, kd=20.0, dq=10.0, tau=50.0))
+    o = core.step(0.2)
+    assert np.array_equal(o.q, q)
+    assert np.all(o.kp == 200.0) and np.all(o.kd == 20.0) and np.all(o.dq == 10.0) and np.all(o.tau == 50.0)
+    assert not o.holding
+
+
+def test_range_boundaries_inclusive(core):
+    """Границы диапазонов включительно: kp 1000, kd 100, tau ±100, dq ±20 не меняются."""
+    run(core, 0.0, 0.2, cmd=make_cmd(HOME_Q, kp=1000.0, kd=100.0, dq=-20.0, tau=-100.0))
+    o = core.step(0.2)
+    assert np.all(o.kp == 1000.0) and np.all(o.kd == 100.0) and np.all(o.dq == -20.0) and np.all(o.tau == -100.0)
 
 
 def test_mode_constant():

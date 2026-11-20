@@ -276,6 +276,7 @@ def run(args):
     j.destroy_node()
     rclpy.try_shutdown()
     rep, ok = evaluate(rec, bounds, jc, collide_q, cycles)
+    rep['passthrough'] = passthrough(rec, j.sent, bounds)
     if args.external_sim:
         rep['physics'] = physics_report(rec, meas, height, bounds)
     return rep, ok
@@ -304,6 +305,21 @@ def physics_report(rec, meas, height, bounds):
 
 
 # ---------------------------------------------------------------------------- оценка
+def _key(q, dq, kp, kd, tau):
+    return b''.join(np.asarray(v, dtype=np.float32)[:12].tobytes() for v in (q, dq, kp, kd, tau))
+
+
+def passthrough(rec, sent, bounds, phase='безопасная траектория', skip=0.2):
+    """Справочно (не критерий ТЗ): доля команд безопасной траектории, которые вышли в /lowcmd без изменений —
+    все 12 приводов, q/dq/kp/kd/tau побитово во float32 (в judge_sim: kp=40, kd=2, dq=0, tau=0)."""
+    a, b = [(x, y) for n, x, y in bounds if n == phase][0]
+    outs = {_key(r[1]['q'], r[1]['dq'], r[1]['kp'], r[1]['kd'], r[1]['tau']) for r in rec}
+    z, kp, kd = np.zeros(12), np.full(12, 40.0), np.full(12, 2.0)
+    cmds = [q for t, q, bad in sent if q is not None and not bad and a + skip <= t < b]
+    hit = sum(_key(q, z, kp, kd, z) in outs for q in cmds)
+    return {'sent': len(cmds), 'unchanged': hit, 'share': hit / len(cmds) if cmds else 0.0}
+
+
 def evaluate(rec, bounds, jc, collide_q, cycles):
     ph = {name: (a, b) for name, a, b in bounds}
     res, notes = {}, []
@@ -321,11 +337,14 @@ def evaluate(rec, bounds, jc, collide_q, cycles):
     after = t[t >= a]
     gaps = np.diff(after) if after.size > 1 else np.array([1e9])
     max_gap = float(gaps.max())
+    gi = int(np.argmax(gaps)) if after.size > 1 else 0
+    gap_at = float(after[gi]) if after.size > 1 else 0.0
+    gap_phase = next((n for n, x, y in bounds if x <= gap_at < y), '?')
     min_win = min(((t >= s) & (t < s + 5.0)).sum() / 5.0 for s in np.arange(a, t[-1] - 5.0, 0.5))
     ok1 = rate >= 50 and max_gap <= 0.1 and min_win >= 50
     mean_rate = (after.size - 1) / float(after[-1] - after[0]) if after.size > 1 else 0.0
     res[1] = (ok1, 3, f'{rate:.0f} Гц в окне 5 с, средн. {mean_rate:.0f} Гц, мин. по скользящим окнам {min_win:.0f} Гц, '
-              f'макс. пауза {max_gap * 1000:.0f} мс')
+              f'макс. пауза {max_gap * 1000:.0f} мс (t={gap_at:.2f} с, фаза «{gap_phase}»)')
 
     # 5. NaN/Inf во всех 20 моторах и всех полях
     nonfinite = sum(int(not np.all(np.isfinite(r[1][f]))) for r in rec for f in FIELDS)
@@ -417,6 +436,10 @@ def print_table(rep):
     for r in rep['rows']:
         print(f"| {r['n']} | {r['criterion']} | {r['points']}/{r['max']} | {r['detail']} |")
     print(f"| | **Итого** | **{rep['score']}/{rep['max']}** | сообщений /lowcmd: {rep.get('messages', 0)} |")
+    pt = rep.get('passthrough')
+    if pt:
+        print(f"Справочно: безопасная траектория — без изменений вышло {pt['unchanged']} из {pt['sent']} команд "
+              f"({100 * pt['share']:.1f}%)")
     for n in rep.get('notes', []):
         print(n)
     if 'physics' in rep:

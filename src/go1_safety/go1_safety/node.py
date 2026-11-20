@@ -8,6 +8,11 @@
     и проверяет пути с бюджетом по ВРЕМЕНИ (compute_budget_ms за порцию, продолжение — в следующей порции).
     Не успел — таймер публикует прежнюю безопасную позу. Следующая поза считается только после того, как предыдущая
     опубликована, поэтому шаг между соседними /lowcmd ≤ max_step при любой загрузке.
+  * немедленная публикация (immediate_publish, по умолчанию да): колбэк входа сразу делает шаг ядра для принятой
+    команды и публикует результат — безопасная команда выходит без задержки и без изменений даже при входе 500 Гц
+    (раньше до выхода доходила лишь та, что совпала с тиком 200 Гц). Перед этим колбэк выпускает ещё не опубликованную
+    позу рабочего потока: публикации идут строго в порядке расчёта ядром (каждая следующая ≤ max_step от предыдущей,
+    путь проверен). Все публикации — под out_lock; таймер 200 Гц остаётся для ровности потока и удержания.
 """
 import math
 import os
@@ -39,6 +44,7 @@ class SafetyBlock(Node):
         max_step_deg = float(p('max_step_deg', math.degrees(MAX_STEP_RAD)).value)
         threshold = float(p('collision_threshold', 0.0005).value)
         self.budget_s = float(p('compute_budget_ms', 1.2).value) / 1000.0
+        self.immediate = bool(p('immediate_publish', True).value)
         in_topic = p('input_topic', '/lowcmd_bare').value
         out_topic = p('output_topic', '/lowcmd').value
         state_topic = p('state_topic', '/lowstate').value
@@ -66,6 +72,11 @@ class SafetyBlock(Node):
         self.last_pub_wall = None
         self.work_cpu = 0.0
         self.work_max = 0.0
+        self.cb_cpu = 0.0
+        self.n_cb_pub = 0
+        self.pub_call_max = 0.0     # самый долгий вызов publish (диагностика блокировки DDS)
+        self.in_gap_max = 0.0       # самый большой промежуток между колбэками входа (диагностика простоя executor)
+        self.last_in_wall = None
         self.n_slow_decode = 0
 
         # BEST_EFFORT-подписка совместима и с RELIABLE, и с BEST_EFFORT издателем Judge; выход RELIABLE — с любой подпиской
@@ -103,24 +114,75 @@ class SafetyBlock(Node):
 
     def _on_cmd_raw(self, raw):
         t = self._now()
+        w = time.monotonic()
+        if self.last_in_wall is not None:
+            self.in_gap_max = max(self.in_gap_max, w - self.last_in_wall)
+        self.last_in_wall = w
         with self.in_lock:
-            self.in_raw, self.in_t = raw, t         # только последнее сообщение
             self.n_in += 1
+            if not self.immediate:
+                self.in_raw, self.in_t = raw, t     # старый режим: разбирает рабочий поток, только последнее
+                return
+        c0 = time.thread_time()
+        deadline = time.perf_counter() + self.budget_s
+        fields = self._decode(raw)
+        try:
+            with self.core_lock:
+                with self.out_lock:                 # сначала — поза рабочего потока, если ещё не ушла (порядок расчёта)
+                    if self.out_bytes is not None and self.pub_seq != self.out_seq:
+                        self._publish_locked()
+                if fields is None:
+                    self.core.stats.rejected_shape += 1
+                    self._warn_rejected()
+                    return
+                if not self.core.on_command(fields, t, deadline):
+                    self._warn_rejected()
+                    return
+                out = self.core.step(self._now(), deadline)
+                if out is None:
+                    return
+                data = self.codec.encode(out.q, out.dq, out.kp, out.kd, out.tau)
+                with self.out_lock:
+                    self.out_bytes = data
+                    self.out_seq += 1
+                    self._publish_locked()
+                    self.n_cb_pub += 1
+                self._log_holding(out.holding)
+        finally:
+            self.cb_cpu += time.thread_time() - c0
 
-    def _publish(self):
-        with self.out_lock:
-            data, seq = self.out_bytes, self.out_seq
-        if data is None:
-            return
-        self.pub.publish(data)                      # готовые байты LowCmd, без вычислений
-        with self.out_lock:
-            self.pub_seq = seq
+    def _warn_rejected(self):
+        self.get_logger().warn('Команда отклонена (NaN/Inf, форма или нет безопасного пути) — держу последнюю безопасную цель',
+                               throttle_duration_sec=2.0)
+
+    def _log_holding(self, holding):
+        if holding != self.out_holding:
+            self.out_holding = holding
+            self.get_logger().info('Удержание последней принятой цели (нет входа)' if holding
+                                   else 'Вход есть — отрабатываю команды')
+
+    def _publish_locked(self):
+        """Опубликовать текущую позу слота. Вызывать только под out_lock — так порядок публикаций = порядок расчёта."""
+        p0 = time.perf_counter()
+        self.pub.publish(self.out_bytes)            # готовые байты LowCmd, без вычислений
+        self.pub_call_max = max(self.pub_call_max, time.perf_counter() - p0)
+        self.pub_seq = self.out_seq
         self.n_pub += 1
         w = time.monotonic()
         if self.last_pub_wall is not None:
             self.max_pub_gap = max(self.max_pub_gap, w - self.last_pub_wall)
         self.last_pub_wall = w
         self.published.set()
+
+    def _publish(self):
+        """Таймер 200 Гц: ровный поток и удержание. Пропускает тик, если только что публиковали и новой позы нет."""
+        with self.out_lock:
+            if self.out_bytes is None:
+                return
+            if (self.pub_seq == self.out_seq and self.last_pub_wall is not None
+                    and time.monotonic() - self.last_pub_wall < 0.8 * self.period):
+                return
+            self._publish_locked()
 
     # ------------------------------------------------------------------ рабочий поток: разбор входа, движение, коллизии
     def _decode(self, raw):
@@ -144,14 +206,13 @@ class SafetyBlock(Node):
                 self.in_raw = None
             try:
                 with self.core_lock:
-                    if raw is not None:
+                    if raw is not None:                 # только при immediate_publish:=false
                         fields = self._decode(raw)
                         ok = fields is not None and self.core.on_command(fields, t_in, deadline)
                         if fields is None:
                             self.core.stats.rejected_shape += 1
                         if not ok:
-                            self.get_logger().warn('Команда отклонена (NaN/Inf, форма или нет безопасного пути) — '
-                                                   'держу последнюю безопасную цель', throttle_duration_sec=2.0)
+                            self._warn_rejected()
                     with self.out_lock:
                         ready = self.out_bytes is None or self.pub_seq == self.out_seq
                     if ready:
@@ -159,12 +220,11 @@ class SafetyBlock(Node):
                         if out is not None:
                             data = self.codec.encode(out.q, out.dq, out.kp, out.kd, out.tau)
                             with self.out_lock:
-                                self.out_bytes = data
-                                self.out_seq += 1
-                            if out.holding != self.out_holding:
-                                self.out_holding = out.holding
-                                self.get_logger().info('Удержание последней принятой цели (нет входа)' if out.holding
-                                                       else 'Вход есть — отрабатываю команды')
+                                # та же поза, что уже опубликована, — не новая: не удваиваем поток (таймер повторит сам)
+                                if data != self.out_bytes:
+                                    self.out_bytes = data
+                                    self.out_seq += 1
+                            self._log_holding(out.holding)
                     elif self.core.search is not None:
                         self.core.think(self._now(), deadline)   # предыдущая поза ещё не ушла — только поиск пути
             except Exception as e:  # noqa: BLE001 — рабочий поток не должен умирать: публикуется прежняя поза
@@ -178,12 +238,15 @@ class SafetyBlock(Node):
         gap, self.max_pub_gap = self.max_pub_gap, 0.0
         self.get_logger().info(
             f'stats: in {self.n_in / self.stats_period:.0f} Гц, pub {self.n_pub / self.stats_period:.0f} Гц '
-            f'(макс. пауза {gap * 1000:.0f} мс wall), расчёт {100 * self.work_cpu / self.stats_period:.1f}% ядра '
+            f'(сразу из колбэка {self.n_cb_pub / self.stats_period:.0f} Гц, макс. пауза {gap * 1000:.0f} мс wall, '
+            f'макс. publish {self.pub_call_max * 1000:.1f} мс, макс. промежуток входа {self.in_gap_max * 1000:.0f} мс), '
+            f'колбэк {100 * self.cb_cpu / self.stats_period:.1f}% ядра, расчёт {100 * self.work_cpu / self.stats_period:.1f}% ядра '
             f'(макс порция {self.work_max * 1000:.2f} мс), проверок {self.checker.evals}, принято {s.accepted}, '
             f'NaN/Inf {s.rejected_nonfinite}, клип q {s.clipped_q}, отказ-коллизия {s.rejected_collision}, '
             f'отходов {s.retreats}, упоры {s.blocked}, медл. разбор {self.n_slow_decode}')
-        self.n_in = self.n_pub = 0
-        self.work_cpu = self.work_max = 0.0
+        self.n_in = self.n_pub = self.n_cb_pub = 0
+        self.pub_call_max = self.in_gap_max = 0.0
+        self.work_cpu = self.work_max = self.cb_cpu = 0.0
         self.checker.evals = 0
 
     def destroy_node(self):

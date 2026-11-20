@@ -23,9 +23,12 @@ Q_MIN = Q_MIN_TZ + Q_MARGIN
 Q_MAX = Q_MAX_TZ - Q_MARGIN
 
 MAX_STEP_RAD = math.radians(4.5)                  # ТЗ: ≤ 5° между соседними командами
-TORQUE_LIMIT = np.array([23.7, 23.7, 35.55] * 4)  # пределы моментов симулятора (core.TORQUE_LIMIT)
-KP_MAX = 100.0
-KD_MAX = 10.0
+# Допустимые значения LowCmd для 12 приводов — официальное уточнение организаторов к ТЗ_T2:
+#   kp 0..1000, kd 0..100, tau −100..+100, dq −20..+20. Это фильтр некорректных команд, а не физические пределы:
+#   момент симулятор ограничивает сам (hip/thigh ±23.7, calf ±35.55 Н·м). Вне диапазона — клиппинг.
+KP_MAX = 1000.0
+KD_MAX = 100.0
+TAU_MAX = 100.0
 DQ_MAX = 20.0
 HOLD_KP = 40.0                                    # как удержание в симуляторе
 HOLD_KD = 2.0
@@ -245,7 +248,7 @@ class SafetyCore:
             'dq': np.clip(arr['dq'][:N_MOTORS], -DQ_MAX, DQ_MAX),
             'kp': np.clip(arr['kp'][:N_MOTORS], 0.0, KP_MAX),
             'kd': np.clip(arr['kd'][:N_MOTORS], 0.0, KD_MAX),
-            'tau': np.clip(arr['tau'][:N_MOTORS], -TORQUE_LIMIT, TORQUE_LIMIT),
+            'tau': np.clip(arr['tau'][:N_MOTORS], -TAU_MAX, TAU_MAX),
         }
         if self.out_q is None:                       # команда раньше /lowstate: стартуем из home
             self._init_pose(HOME_Q)

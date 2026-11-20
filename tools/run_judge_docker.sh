@@ -53,5 +53,6 @@ awk '{gsub("%","",$1); v=$1+0; s+=v; if(v>m)m=v; n++} END{if(n) printf "  CPU с
 tail -1 "$OUT/stats.txt" | awk '{print "  RAM", $2, $3, $4}'
 echo "Статистика Safety Block из лога:"
 docker logs "$PART" 2>&1 | grep -E 'stats:|Стартовая поза|отклонена' | tail -4 | sed 's/^/  /'
+[[ -n "${PART_LOG:-}" ]] && docker logs "$PART" > "$PART_LOG" 2>&1   # полный лог контейнера решения (диагностика)
 [[ -f "$OUT/report.json" ]] && cp "$OUT/report.json" "${REPORT:-/tmp/t2_report.json}" 2>/dev/null
 exit $RC
