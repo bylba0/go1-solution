@@ -354,3 +354,19 @@ def test_range_boundaries_inclusive(core):
 
 def test_mode_constant():
     assert MODE_SERVO == 10
+
+
+def test_500hz_safe_trajectory_passes_q_and_dq_exactly(core):
+    """Вход 500 Гц, безопасная траектория с dq=10: после разгона у каждой принятой команды выход — ровно её q и dq
+    (как в узле: колбэк сразу делает шаг ядра). Раньше ~1.5 % давали out_q ≠ цели на ~1e-17 рад → dq=0."""
+    dt, t, bad, n = 0.002, 0.0, [], 0
+    for k in range(2500):                                # 5 с
+        q = HOME_Q + np.array([0.08, 0.25, -0.3] * 4) * math.sin(2 * math.pi * 0.5 * t)
+        accepted = core.on_command(make_cmd(q, kp=40.0, kd=2.0, dq=10.0), t)
+        o = core.step(t)
+        if accepted and t >= 0.2:
+            n += 1
+            if not (np.array_equal(o.q, np.clip(q, Q_MIN, Q_MAX)) and np.all(o.dq == 10.0)):
+                bad.append((k, float(np.max(np.abs(o.q - q))), o.dq[0]))
+        t += dt
+    assert n > 2000 and not bad, f'несовпадений {len(bad)} из {n}, первые: {bad[:3]}'

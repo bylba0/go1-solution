@@ -42,6 +42,7 @@ SEARCH_BUDGET_TICK_S = 0.0012                     # с: на каждой сле
 SEARCH_BUDGET_TOTAL = 20000                       # вычислений всего на одну цель (≈ 0.4–0.6 с CPU), дальше — отказ
 EVAL_CHUNK = 8                                    # вычислений между проверками часов
 RETREAT_CANDIDATES = 40                           # сколько точек истории пробуем как начало обходного пути
+SNAP_EPS = 1e-9                                   # рад: «дошли до цели» — присваиваем цель ровно
 REPLAN_PERIOD = 0.2                               # с sim: та же отклонённая цель перепроверяется не чаще
 
 
@@ -306,6 +307,10 @@ class SafetyCore:
         # страховка от численных хвостов: шаг строго в пределах и не больше max_step
         q_new = np.clip(q, Q_MIN, Q_MAX)
         q_new = self.out_q + np.clip(q_new - self.out_q, -self.max_step, self.max_step)
+        # a + (b − a) в плавающей точке не всегда даёт ровно b (~1e-17 рад): дошли — ставим ровно цель, иначе
+        # at_goal=false и на выходе dq=0 вместо заданного. Цель (или точка истории) уже проверена; 1e-9 рад ≪ запаса шага.
+        if float(np.max(np.abs(q_new - target))) < SNAP_EPS:
+            q_new = target.copy()
         self.out_q = q_new
         self._remember(self.out_q, deadline)
         return np.array_equal(self.out_q, target)

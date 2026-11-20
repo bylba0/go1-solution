@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Прогон T2 в Docker: контейнер решения (`/entrypoint.sh T2`, как у организаторов: --network host, их inline-XML CycloneDDS)
 # + соседний контейнер с tools/judge_sim.py. Печатает таблицу баллов и нагрузку CPU контейнера решения.
-# Использование: tools/run_judge_docker.sh [IMAGE] ; CMD_RATE=100 FORCE_T2=1 CPUS=0.5
+# Использование: tools/run_judge_docker.sh [IMAGE] ; CMD_RATE=100 FORCE_T2=1 CPUS=0.5 CMD_DQ=0 PART_LOG=файл
 #   CPUS — ограничение CPU контейнера решения (docker --cpus), имитирует слабое железо; пусто — без ограничения.
 #   FORCE_T2=1 (по умолчанию) — подменяет манифест на {"supported_tasks":["T2"]} через GO1_MANIFEST, чтобы проверить T2
 #   до того, как он заявлен в solution_manifest.json; FORCE_T2=0 — запуск как есть.
@@ -43,7 +43,7 @@ STATS_PID=$!
 docker run --rm --name "$JUDGE" --platform linux/amd64 --network host "${ENV[@]}" \
   --mount "type=bind,src=$HERE,dst=/tools,readonly" --mount "type=bind,src=$OUT,dst=/out" \
   --entrypoint bash "$IMAGE" -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && \
-    python3 /tools/judge_sim.py --cmd-rate $CMD_RATE --json /out/report.json"
+    python3 /tools/judge_sim.py --cmd-rate $CMD_RATE --cmd-dq ${CMD_DQ:-0} --json /out/report.json"
 RC=$?
 
 kill "$STATS_PID" 2>/dev/null; STATS_PID=

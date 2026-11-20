@@ -54,6 +54,7 @@ echo "Нагрузка (docker stats, раз в ~1 с):"
 for c in "$PART" "$SIM"; do
   grep "^$c " "$LOG.stats" | awk -v n="$c" '{gsub("%","",$2); v=$2+0; s+=v; if(v>m)m=v; k++; mem=$3} END{if(k) printf "  %s: CPU средн. %.1f%%, макс %.1f%%, RAM %s\n", n, s/k, m, mem}'
 done
+[[ -n "${PART_LOG:-}" ]] && cp "$LOG" "$PART_LOG"   # полный лог run_local (Simulator + решение) — диагностика
 echo "Лог Safety Block (из run_local):"
 grep -E 'go1_safety_block|entrypoint' "$LOG" | grep -E 'stats:|Стартовая|запуск|Safety Block:' | tail -4 | cut -c1-220 | sed 's/^/  /'
 grep -E 'LowCmd не приходит|держу позу' "$LOG" | head -2 | sed 's/^/  сим: /'

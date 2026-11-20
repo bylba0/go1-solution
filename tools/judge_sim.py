@@ -158,6 +158,7 @@ class Judge(Node):
         self.cmd_pub = self.create_publisher(LowCmd, '/lowcmd_bare', qos_out)
         self.create_subscription(LowCmd, '/lowcmd', self._on_out, qos_in)
         self.sim_t = 0.0
+        self.cmd_dq = float(args.cmd_dq)  # dq в командах (проверка, что заданный dq доходит до выхода без изменений)
         self.ext_clock = None         # --external-sim: время сима из /clock
         self.ext_t0 = None
         self.meas = []                # --external-sim: (sim_t, q12 измеренные)
@@ -205,7 +206,7 @@ class Judge(Node):
         m = LowCmd()
         for i in range(12):
             c = m.motor_cmd[i]
-            c.mode, c.q, c.kp, c.kd = 10, float(q12[i]), 40.0, 2.0
+            c.mode, c.q, c.kp, c.kd, c.dq = 10, float(q12[i]), 40.0, 2.0, self.cmd_dq
         if bad:
             variants = [('q', 2, float('nan')), ('kp', 7, float('inf')), ('tau', 15, float('-inf')),
                         ('dq', 0, float('nan')), ('kd', 11, float('-inf'))]
@@ -276,7 +277,7 @@ def run(args):
     j.destroy_node()
     rclpy.try_shutdown()
     rep, ok = evaluate(rec, bounds, jc, collide_q, cycles)
-    rep['passthrough'] = passthrough(rec, j.sent, bounds)
+    rep['passthrough'] = passthrough(rec, j.sent, bounds, dq=args.cmd_dq)
     if args.external_sim:
         rep['physics'] = physics_report(rec, meas, height, bounds)
     return rep, ok
@@ -309,14 +310,14 @@ def _key(q, dq, kp, kd, tau):
     return b''.join(np.asarray(v, dtype=np.float32)[:12].tobytes() for v in (q, dq, kp, kd, tau))
 
 
-def passthrough(rec, sent, bounds, phase='безопасная траектория', skip=0.2):
+def passthrough(rec, sent, bounds, phase='безопасная траектория', skip=0.2, dq=0.0):
     """Справочно (не критерий ТЗ): доля команд безопасной траектории, которые вышли в /lowcmd без изменений —
     все 12 приводов, q/dq/kp/kd/tau побитово во float32 (в judge_sim: kp=40, kd=2, dq=0, tau=0)."""
     a, b = [(x, y) for n, x, y in bounds if n == phase][0]
     outs = {_key(r[1]['q'], r[1]['dq'], r[1]['kp'], r[1]['kd'], r[1]['tau']) for r in rec}
-    z, kp, kd = np.zeros(12), np.full(12, 40.0), np.full(12, 2.0)
+    z, kp, kd, dqv = np.zeros(12), np.full(12, 40.0), np.full(12, 2.0), np.full(12, float(dq))
     cmds = [q for t, q, bad in sent if q is not None and not bad and a + skip <= t < b]
-    hit = sum(_key(q, z, kp, kd, z) in outs for q in cmds)
+    hit = sum(_key(q, dqv, kp, kd, z) in outs for q in cmds)
     return {'sent': len(cmds), 'unchanged': hit, 'share': hit / len(cmds) if cmds else 0.0}
 
 
@@ -457,6 +458,7 @@ def main():
     ap.add_argument('--model', default='/opt/go1/models/unitree_go1/go1.xml')
     ap.add_argument('--cmd-rate', type=float, default=100.0)
     ap.add_argument('--json', default='')
+    ap.add_argument('--cmd-dq', type=float, default=0.0, help='dq во всех командах (по умолчанию 0)')
     ap.add_argument('--cycles', type=int, default=CYCLES, help='циклов «опасная → безопасная» (по умолчанию 50)')
     ap.add_argument('--demo', action='store_true',
                     help='порядок фаз для наглядности: опасные позы, от которых робот может упасть, — в конце')
