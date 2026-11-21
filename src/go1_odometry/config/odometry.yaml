@@ -1,0 +1,29 @@
+# T4: параметры узла go1_odometry (загружаются из go1_bringup/launch/t4.launch.py).
+# Пороги ТЗ_T4 (раздел 6): /odom и TF ≥ 20 Гц sim → публикуем 50 Гц; RPE ≤ 20 %; дрейф ≤ 0,10 м и ≤ 5° за 10 с.
+go1_odometry:
+  ros__parameters:
+    imu_topic: /imu/data
+    joint_states_topic: /joint_states
+    foot_force_topic: /foot_force
+    odom_topic: /odom
+    odom_frame: odom
+    base_frame: trunk
+    publish_tf: true
+    update_rate: 200.0          # Гц sim: расчёт (суставы приходят ~990 Гц, берётся последнее)
+    publish_rate: 50.0          # Гц sim: /odom и TF (ТЗ: ≥ 20)
+    use_foot_force: false       # /foot_force — необязательный сигнал опоры (без него основной режим)
+    foot_force_order: [FL, FR, RL, RR]   # порядок каналов /foot_force (по корреляции с кинематикой на bag A)
+    foot_force_threshold: 5.0
+    pose_covariance_diagonal: [0.01, 0.01, 0.01, 0.001, 0.001, 0.003]
+    twist_covariance_diagonal: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    estimator:
+      orientation_mode: imu     # imu — кватернион /imu/data; gyro — запасной (интегрирование угловой скорости)
+      stance_height: 0.005
+      zupt_foot_speed: 0.01
+      zupt_ang_speed: 0.02
+      max_dt: 0.1
+      foot_radius: 0.02
+      initial_height: 0.29
+      height_alpha: 0.02
+      twist_alpha: 0.2
+      contact_timeout: 0.1
