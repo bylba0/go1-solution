@@ -293,14 +293,19 @@ def crit(name, value, op, thr, points=None):
 
 def evaluate(rec, ph, meta):
     od, tf, gt = rec['odom'], rec['tf'], rec['gt']
-    t0, t1 = ph['eval0'], ph['drift1']
+    t0, t1 = ph['eval0'], ph.get('eval1', ph['drift1'])
     res = {'meta': meta, 'phases': ph, 'thresholds_tz': TZ, 'thresholds_stage3': STAGE3}
     so, st = stream_checks('/odom', od, t0, t1), stream_checks('TF odom->trunk', tf, t0, t1, STAMP_VS_CLOCK_TF_S)
     res['odom'], res['tf'] = so, st
     res['tf_other_parents_for_trunk'] = rec.get('tf_other', {})
     res['consistency'] = consistency(od, tf)
-    res['rpe'] = rpe(gt, od, ph['eval0'], ph['drift0'])
+    res['rpe'] = rpe(gt, od, ph['eval0'], min(ph['drift0'], t1))
     res['drift'] = drift(od, gt, ph['drift0'], ph['drift1'])
+    if ph.get('rpe_na'):
+        res['rpe'] = {'segments': [], 'A_mean': None, 'B_mean': None, 'A_se3_mean': None, 'worst': None,
+                      'missing': 0, 'n_segments': 0, 'na': 'нет движения'}
+    if ph.get('drift_na'):
+        res['drift'].update(pos_m=None, ang_deg=None, yaw_deg=None, na='интервал дрейфа не помещается в запись')
     res['forbidden'] = rec.get('forbidden', {})
     c = res['consistency']
     worst_rate = min(so['min_rate_hz'] or 0, st['min_rate_hz'] or 0)
@@ -342,17 +347,24 @@ def evaluate(rec, ph, meta):
     if meta.get('aborted'):   # сценарий не доведён до конца — результат не засчитываем
         tz_list.append({'criterion': 'Сценарий выполнен до конца (стенд)', 'result': 'FAIL', 'points': 0,
                         'value': meta['aborted']})
+    def na(lst):   # критерии, не применимые к записи (нет движения / дрейф не помещается) → N/A, в вердикт не идут
+        for x in lst:
+            c_ = x['criterion']
+            if (ph.get('rpe_na') and 'RPE' in c_) or (ph.get('drift_na') and ('рейф' in c_)):
+                x['result'], x['points'] = 'N/A', 0
+    na(tz_list)
     res['criteria_tz'] = tz_list
     res['points_tz'] = sum(x.get('points', 0) for x in tz_list)
-    res['verdict_tz'] = 'PASS' if all(x['result'] == 'PASS' for x in tz_list) else 'FAIL'
+    res['verdict_tz'] = 'PASS' if all(x['result'] in ('PASS', 'N/A') for x in tz_list) else 'FAIL'
     s3 = [crit('частота /odom и TF, мин. в окне 1 с', worst_rate, '>=', STAGE3['rate_hz']),
           crit('NaN/Inf', nonfinite, '==', 0),
           crit('публикация по ТЗ (все проверки)', pub_ok, '==', True),
           crit('RPE худший из A/B', worst, '<=', STAGE3['rpe']),
           crit('дрейф положения, м', d['pos_m'], '<=', STAGE3['drift_pos_m']),
           crit('дрейф ориентации (полный угол), °', d['ang_deg'], '<=', STAGE3['drift_ang_deg'])]
+    na(s3)
     res['criteria_stage3'] = s3
-    res['verdict_stage3'] = 'PASS' if all(x['result'] == 'PASS' for x in s3) else 'FAIL'
+    res['verdict_stage3'] = 'PASS' if all(x['result'] in ('PASS', 'N/A') for x in s3) else 'FAIL'
     return res
 
 
@@ -740,6 +752,9 @@ def run_bag(args):
             cmd += ['--entrypoint', '/entrypoint.sh', args.image, 'T4']
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
         spin_for(rclpy, node, lambda: False, args.startup_wait)
+        if args.image:   # ждём, пока решение поднимет издателя /odom (до --odom-pub-wait с wall)
+            ok = spin_for(rclpy, node, lambda: bool(node.get_publishers_info_by_topic('/odom')), args.odom_pub_wait, 1.0)
+            print(f"[bag] издатель /odom {'есть' if ok else 'НЕ появился за %.0f с' % args.odom_pub_wait}", flush=True)
         print(f'[bag] проигрываю {bag.name} (rate {args.rate}, /clock из bag)', flush=True)
         w0 = time.monotonic()
         play = subprocess.Popen(['ros2', 'bag', 'play', str(bag), '--rate', str(args.rate),
@@ -771,14 +786,23 @@ def run_bag(args):
             subprocess.run(['docker', 'rm', '-f', container], capture_output=True)
     cmd = np.array(node.cmd, float) if node.cmd else np.zeros((0, 3))
     moving = cmd[(np.abs(cmd[:, 1]) > 1e-3) | (np.abs(cmd[:, 2]) > 1e-3)] if len(cmd) else cmd
+    t_end = float(node.now or 0)
     if not len(moving):
-        raise SystemExit('в bag нет ненулевых /cmd_vel — не определить фазы')
-    m0, m1 = float(moving[0, 0]), float(moving[-1, 0])
-    ph = {'eval0': m0 - args.pre, 'motion0': m0, 'motion1': m1, 'drift0': m1 + args.transition,
-          'drift1': m1 + args.transition + 10.0}
+        # bag без движения (D — мягкий старт): только публикация; RPE и дрейф не применимы
+        t_first = float(node.gt[0][0]) if node.gt else t_end
+        print('[bag] в bag нет ненулевых /cmd_vel — только частота/NaN/stamp/frame, RPE и дрейф не применимы', flush=True)
+        ph = {'eval0': t_first + args.pre, 'motion0': None, 'motion1': None, 'drift0': t_end, 'drift1': t_end,
+              'eval1': t_end, 'rpe_na': True, 'drift_na': True}
+    else:
+        m0, m1 = float(moving[0, 0]), float(moving[-1, 0])
+        ph = {'eval0': m0 - args.pre, 'motion0': m0, 'motion1': m1, 'drift0': m1 + args.transition,
+              'drift1': m1 + args.transition + 10.0}
+        if ph['drift1'] > t_end:
+            print(f"[bag] конец интервала дрейфа {ph['drift1']:.1f} позже конца bag {t_end:.1f} с sim — дрейф не применим",
+                  flush=True)
+            ph['drift_na'] = True
+            ph['eval1'] = t_end
     sim_s = (node.now or 0) - (node.gt[0][1] if node.gt else 0)
-    if node.now is not None and ph['drift1'] > node.now:
-        print(f"[bag] ВНИМАНИЕ: конец интервала дрейфа {ph['drift1']:.1f} позже конца bag {node.now:.1f} с sim", flush=True)
     meta = {'mode': 'bag', 'source': f"{bag.name} + {('заглушка ' + args.stub) if args.stub else args.image}",
             'rate': args.rate, 'sim_s': sim_s, 'wall_s': wall, 'rtf': sim_s / max(wall, 1e-6)}
     return node, rclpy, ph, meta
@@ -825,6 +849,7 @@ def main():
     bg.add_argument('--pre', type=float, default=3.0, help='начало оценки: за столько с sim до первой команды')
     bg.add_argument('--transition', type=float, default=5.0, help='от последней команды до начала 10 с дрейфа, с sim')
     bg.add_argument('--startup-wait', type=float, default=5.0, help='wall, с: дать решению подняться')
+    bg.add_argument('--odom-pub-wait', type=float, default=90.0, help='wall, с: ждать издателя /odom от образа')
     bg.add_argument('--no-bag-tf', action='store_true', help='не проигрывать /tf суставов из bag')
     ra = sub.add_parser('reanalyze')
     ra.add_argument('record')
