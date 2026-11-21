@@ -8,7 +8,7 @@
 |---|---|---|
 | T1 — образ и `/entrypoint.sh ping` | готово | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
 | T2 — Safety Block | сдан 20.11.2026 (judge_sim 12/12, в т.ч. с симулятором организаторов) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
-| T4 — одометрия (`/odom` + TF `odom → trunk`) | в работе: заявлено в манифесте ветки разработки, сдача — по решению владельца | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
+| T4 — одометрия (`/odom` + TF `odom → trunk`) | готово, заявлено в манифесте (стенд: 5 живых + 4 bag, худшее RPE 11,1 %, 20/20); сдача — по решению владельца | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
 | T3, T5 | не начато | — |
 
 Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`, сейчас `["T2", "T4"]`);
