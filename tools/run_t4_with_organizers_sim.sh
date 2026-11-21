@@ -31,7 +31,7 @@ mkdir -p "$OUT"
 DOCKER=docker; docker info >/dev/null 2>&1 || DOCKER="sg docker -c docker"   # в оболочке без группы docker
 d() { if [[ "$DOCKER" == docker ]]; then docker "$@"; else sg docker -c "docker $(printf '%q ' "$@")"; fi; }
 
-source /opt/ros/humble/setup.bash
+set +u; source /opt/ros/humble/setup.bash; set -u
 export ROS_DOMAIN_ID="$DOMAIN" RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ROS_LOCALHOST_ONLY=0
 export CYCLONEDDS_URI="file://$SIM_REPO/user_data/ros2_custom_config_setup/cyclonedds_local.xml"
 python3 -c "import matplotlib" 2>/dev/null || echo "ВНИМАНИЕ: на хосте нет matplotlib — PNG не будет"

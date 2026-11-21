@@ -42,7 +42,11 @@ STAGE3 = dict(rate_hz=40.0, rpe=0.35, drift_pos_m=0.03, drift_ang_deg=1.5)  # п
 QUAT_TOL = 1e-6            # |q| = 1 ± 1e-6
 CONSIST_POS_M = 1e-3       # /odom и TF при одном stamp — одна поза
 CONSIST_ANG_DEG = 0.1
-STAMP_VS_CLOCK_S = 0.5     # stamp не дальше 0,5 с от /clock в момент приёма (ловит wall-время в stamp)
+STAMP_VS_CLOCK_S = 0.5     # /odom: stamp не дальше 0,5 с от /clock в момент приёма (ловит wall-время и отставание)
+STAMP_VS_CLOCK_TF_S = 5.0  # TF: мягче — /tf несёт ~1 кГц sim суставов, очередь подписчика стенда отстаёт на секунды
+                           # (артефакт стенда, замерено при проигрывании bag); wall-время в stamp ловит и так
+# Частота и разрывы — по header.stamp (sim). По времени приёма (/clock стенда) — только справочно: в Python-стенде
+# под нагрузкой callbacks /tf идут пачками, и «частота по приёму» занижается не по вине решения.
 SEG_LEN_M = 1.0            # 6.4: участки ≈ 1 м фактического пути
 SEG_MIN_TAIL_M = 0.5       # хвост короче — не оцениваем (TODO(уточнить) у Judge)
 PATH_SMOOTH_S = 0.5        # длина пути — по горизонтали, по истине, сглаженной скользящим средним 0,5 с: раскачка корпуса
@@ -143,7 +147,7 @@ def window_rate(t, t0, t1, step=0.05):
     return int(cnt.min()), float(gaps.max())
 
 
-def stream_checks(name, a, t0, t1):
+def stream_checks(name, a, t0, t1, clock_tol=STAMP_VS_CLOCK_S):
     """a: dict массивов одного потока (/odom или TF odom→trunk)."""
     r = {'name': name, 'count_total': int(len(a['stamp']))}
     sel = (a['stamp'] >= t0) & (a['stamp'] <= t1)
@@ -153,8 +157,8 @@ def stream_checks(name, a, t0, t1):
     mn_r, gap_r = window_rate(a['recv'], t0, t1)
     r['min_msgs_per_1s_stamp'], r['max_gap_s_stamp'] = mn_s, gap_s
     r['min_msgs_per_1s_recv'], r['max_gap_s_recv'] = mn_r, gap_r
-    r['min_rate_hz'] = min(x for x in (mn_s, mn_r) if x is not None) if mn_s is not None else 0
-    r['max_gap_s'] = max(gap_s or 0, gap_r or 0) if r['count_eval'] else float(t1 - t0)
+    r['min_rate_hz'] = mn_s if mn_s is not None else 0
+    r['max_gap_s'] = gap_s if r['count_eval'] and gap_s is not None else float(t1 - t0)
     r['mean_rate_hz'] = round(r['count_eval'] / (t1 - t0), 2) if t1 > t0 else 0
     r['nonfinite'] = int((~a['finite']).sum())
     qn = np.linalg.norm(a['q'], axis=1) if len(a['q']) else np.zeros(0)
@@ -167,7 +171,8 @@ def stream_checks(name, a, t0, t1):
     r['stamp_repeats'] = int((d == 0).sum())
     off = np.abs(a['stamp'] - a['recv'])
     r['stamp_vs_clock_max_s'] = float(off.max()) if len(off) else None
-    r['stamp_vs_clock_bad'] = int((off > STAMP_VS_CLOCK_S).sum())
+    r['stamp_vs_clock_tol_s'] = clock_tol
+    r['stamp_vs_clock_bad'] = int((off > clock_tol).sum())
     return r
 
 
@@ -290,7 +295,7 @@ def evaluate(rec, ph, meta):
     od, tf, gt = rec['odom'], rec['tf'], rec['gt']
     t0, t1 = ph['eval0'], ph['drift1']
     res = {'meta': meta, 'phases': ph, 'thresholds_tz': TZ, 'thresholds_stage3': STAGE3}
-    so, st = stream_checks('/odom', od, t0, t1), stream_checks('TF odom->trunk', tf, t0, t1)
+    so, st = stream_checks('/odom', od, t0, t1), stream_checks('TF odom->trunk', tf, t0, t1, STAMP_VS_CLOCK_TF_S)
     res['odom'], res['tf'] = so, st
     res['tf_other_parents_for_trunk'] = rec.get('tf_other', {})
     res['consistency'] = consistency(od, tf)
@@ -310,7 +315,7 @@ def evaluate(rec, ph, meta):
         crit('NaN/Inf (сообщений)', nonfinite, '==', 0),
         crit('|q|=1±1e-6 (нарушений)', badq, '==', 0),
         crit('stamp назад (случаев)', so['stamp_backwards'] + st['stamp_backwards'], '==', 0),
-        crit(f'stamp дальше {STAMP_VS_CLOCK_S} с от /clock (сообщений)',
+        crit(f'stamp дальше {STAMP_VS_CLOCK_S}/{STAMP_VS_CLOCK_TF_S} с (odom/TF) от /clock (сообщений)',
              so['stamp_vs_clock_bad'] + st['stamp_vs_clock_bad'], '==', 0),
         crit('/odom без TF с тем же stamp (сообщений)', c['odom_msgs'] - c['matched_same_stamp'] if c['odom_msgs'] else
              None, '==', 0),
@@ -334,6 +339,9 @@ def evaluate(rec, ph, meta):
     tz_list.append({'criterion': 'Дрейф за 10 с: ≤ 0,10 м и ≤ 5° (полный угол)', 'result': 'PASS' if dr_ok else 'FAIL',
                     'value': {'pos_m': d['pos_m'], 'ang_deg': d['ang_deg'], 'yaw_deg': d['yaw_deg']},
                     'points': 6 if dr_ok else 0})
+    if meta.get('aborted'):   # сценарий не доведён до конца — результат не засчитываем
+        tz_list.append({'criterion': 'Сценарий выполнен до конца (стенд)', 'result': 'FAIL', 'points': 0,
+                        'value': meta['aborted']})
     res['criteria_tz'] = tz_list
     res['points_tz'] = sum(x.get('points', 0) for x in tz_list)
     res['verdict_tz'] = 'PASS' if all(x['result'] == 'PASS' for x in tz_list) else 'FAIL'
@@ -356,6 +364,8 @@ def summary_text(res):
     m, r, d, so, st, c = res['meta'], res['rpe'], res['drift'], res['odom'], res['tf'], res['consistency']
     L = [f"T4 стенд: режим {m.get('mode')} {m.get('source', '')}  sim {fmt(m.get('sim_s'), 1)} с, wall "
          f"{fmt(m.get('wall_s'), 1)} с, RTF {fmt(m.get('rtf'))}"]
+    if m.get('aborted'):
+        L.append(f"  ПРОГОН ПРЕРВАН: {m['aborted']}")
     if m.get('estop'):
         L.append(f"  АВАРИЙНАЯ ОСТАНОВКА: {m['estop']}")
     for s in (so, st):
@@ -624,6 +634,7 @@ def run_live(args, p):
     ws, s_start = time.monotonic(), node.now
     marks, estop = {}, None
     i, t_step, last_ctl, t_graph = 0, node.now, -1.0, 0.0
+    aborted, clk_last, clk_wall = None, node.now, time.monotonic()
     marks[steps[0][0]] = t_step
     print(f"  sim {t_step:8.2f}: {steps[0][0]}", flush=True)
     while i < len(steps):
@@ -632,9 +643,15 @@ def run_live(args, p):
             node.sample_graph()
             t_graph = time.monotonic()
         if time.monotonic() - ws > args.wall_limit:
-            estop = estop or f'превышен лимит wall {args.wall_limit} с'
+            aborted = f'превышен лимит wall {args.wall_limit} с'
             break
         now = node.now
+        if now != clk_last:
+            clk_last, clk_wall = now, time.monotonic()
+        elif time.monotonic() - clk_wall > args.stall:
+            aborted = f'сим остановился: /clock не идёт {args.stall:.0f} с wall (sim {now:.2f} с, шаг {steps[i][0]})'
+            print(f"  ПРЕРВАНО: {aborted}", flush=True)
+            break
         if now - last_ctl < 0.05:
             continue
         last_ctl = now
@@ -681,6 +698,7 @@ def run_live(args, p):
     if ph['drift0'] is None:
         ph['drift0'] = node.now
     meta = {'mode': 'live', 'source': f'preset {args.preset}', 'preset': p, 'marks': marks, 'estop': estop,
+            'aborted': aborted,
             'sim_s': node.now - s_start, 'wall_s': time.monotonic() - ws,
             'rtf': (node.now - s_start) / max(time.monotonic() - ws, 1e-6), 'wall_total_s': time.monotonic() - w0}
     return node, rclpy, ph, meta
@@ -795,6 +813,7 @@ def main():
     lv.add_argument('--transition', type=float)
     lv.add_argument('--ready-timeout', type=float, default=600.0, help='wall, с')
     lv.add_argument('--wait-odom', type=float, default=60.0, help='ждать первый /odom перед сценарием, wall с')
+    lv.add_argument('--stall', type=float, default=60.0, help='/clock не идёт столько wall с → прервать')
     lv.add_argument('--wall-limit', type=float, default=2400.0, help='лимит сценария, wall с')
     bg = sub.add_parser('bag')
     bg.add_argument('bag')
