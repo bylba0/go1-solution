@@ -8,9 +8,10 @@
 |---|---|---|
 | T1 — образ и `/entrypoint.sh ping` | готово | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
 | T2 — Safety Block | готово (judge_sim 12/12, в т.ч. с симулятором организаторов) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
-| T3, T4, T5 | не начато | — |
+| T4 — одометрия (`/odom` + TF `odom → trunk`) | в работе: заявлено в манифесте ветки разработки, сдача — по решению владельца | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
+| T3, T5 | не начато | — |
 
-Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`);
+Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`, сейчас `["T2", "T4"]`);
 `/entrypoint.sh ping` печатает его без запуска ROS.
 
 Новым участникам команды — [docs/TEAM_ONBOARDING.md](docs/TEAM_ONBOARDING.md).
@@ -70,12 +71,39 @@ tools/live_demo.sh go1-solution:dev
 `judge_sim` — не официальный Judge: сценарии (безопасная траектория, выход за пределы, скачок 30°, поза с самоколлизией,
 NaN/Inf, обрыв входа) и пороги взяты из текста ТЗ_T2; коллизии проверяются независимо (исходный go1.xml, шаг 0.1°, > 1 мм).
 
+## Проверка T4
+
+Узел `go1_odometry` (`/entrypoint.sh T4` → `go1_bringup/launch/t4.launch.py`) публикует `/odom` (`odom → trunk`) и
+TF `odom → trunk` с частотой 50 Гц sim. Ориентация — кватернион `/imu/data` (мировой курс), положение — кинематика
+опорных ног по `/joint_states`. Подписки — только `/imu/data`, `/joint_states`, `/clock` (и `/foot_force`, если включён
+параметром); истину и `/cmd_vel` решение не использует. Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
+результаты прогонов — [docs/T4_REPORT.md](docs/T4_REPORT.md).
+
+```bash
+# unit-тесты расчёта без ROS (на хосте, нужен numpy)
+cd src/go1_odometry && python3 -m pytest test/test_core.py -q && cd -
+# все тесты пакета — в образе
+docker run --rm --network none --mount type=bind,src=$PWD/src/go1_odometry,dst=/src,readonly --entrypoint bash \
+  go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
+# живой прогон на Gazebo-симуляторе организаторов (headless, lockstep) + стенд judge_t4.py live; запускать в tmux,
+# один сим за раз, ~7–10 мин wall; пресеты: tz (2 м, влево), right (1,25 м, вправо), tz_open (1,5 м, без коррекции курса)
+CPUS=1.0 tools/run_t4_with_organizers_sim.sh --image go1-solution:dev --preset tz --out /tmp/t4_live_tz
+# офлайн по записанному bag (истина и /cmd_vel — из bag, оценку даёт образ решения)
+tools/judge_t4.py bag <bag> --image go1-solution:dev --cpus 1.0 --rate 1.5 --out /tmp/t4_bag
+# пересчёт метрик по сохранённой записи (в т.ч. с совмещением только положения)
+tools/judge_t4.py reanalyze /tmp/t4_bag/record.npz --align position
+```
+`judge_t4.py` — не официальный Judge: истину (`/odom/ground_truth` публичного сима) он использует только сам — для
+коррекции курса, RPE (A — после совмещения начальной позы, B — в системе начала участка), дрейфа за 10 с и частоты по
+`header.stamp`. В образ стенд не входит.
+
 ## Запуск вместе с симулятором организаторов
 
 ```bash
 git clone https://github.com/Urika000/go1-simulator-public.git && cd go1-simulator-public
 export SIM_IMAGE=registry.cookcloud.ru/go1-hackathon-remote-stage/go1-sim:v1.0
 python3 run_local.py --task T2 --sim-image "$SIM_IMAGE" --participant-image go1-solution:dev --headless --logs
+python3 run_local.py --task T4 --sim-image "$SIM_IMAGE" --participant-image go1-solution:dev --headless --logs   # Gazebo, lockstep
 ```
 
 ## Контракт `/entrypoint.sh`
