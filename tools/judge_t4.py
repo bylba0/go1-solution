@@ -53,6 +53,10 @@ PATH_SMOOTH_S = 0.5        # длина пути — по горизонтали
                            # на рыси (и подпрыгивание по z) раздувает «путь» по сырым 20 Гц в 1,3–1,7 раза → участки
                            # короче 1 м реального хода и ошибка занижается. Сглаживание — строже. TODO(уточнить) у Judge
 
+# Совмещение начальной позы для RPE A. ТЗ 6.2: «Judge совмещает начальную оценённую позу с фактической» → по умолчанию
+# 'pose' (перенос + поворот). 'position' — строже (только перенос: оценка обязана стартовать с мировым курсом);
+# A без поворота печатается всегда, справочно — как риск на случай, если Judge совмещает только положение.
+ALIGN = 'pose'
 V_LIN, W_ANG = 0.2, 0.3    # 6.3: 0,2 м/с и 0,3 рад/с
 STAND_NODES = {'t4_judge', 't4_stub_odom', 'rosbag2_player'}
 
@@ -176,8 +180,11 @@ def stream_checks(name, a, t0, t1, clock_tol=STAMP_VS_CLOCK_S):
     return r
 
 
-def consistency(od, tf):
-    """Одна поза при одном stamp: для каждого /odom ищем TF с тем же stamp (±1 мкс)."""
+def consistency(od, tf, t0=-np.inf, t1=np.inf):
+    """Одна поза при одном stamp: для каждого /odom в окне оценки ищем TF с тем же stamp (±1 мкс).
+    Окно нужно: последний /odom перед остановкой записи может прийти раньше своей TF (артефакт стенда)."""
+    sel = (od['stamp'] >= t0) & (od['stamp'] <= t1)
+    od = {k: v[sel] for k, v in od.items()}
     r = {'odom_msgs': int(len(od['stamp'])), 'matched_same_stamp': 0, 'max_pos_diff_m': None, 'max_ang_diff_deg': None}
     if not len(od['stamp']) or not len(tf['stamp']):
         return r
@@ -201,8 +208,8 @@ def consistency(od, tf):
 def rpe(gt, od, t0, t1):
     """RPE по участкам ≈1 м фактического пути (по истине) на [t0, t1].
     A — разности положений в мировой системе; начальная поза оценки совмещается с истиной только переносом
-        (строгое толкование: поворот совмещения не делаем → оценка должна начинаться с курсом мира).
-    A_se3 — то же с полным совмещением начальной позы (перенос+поворот), справочно.
+        (строгое толкование: поворот совмещения не делаем → оценка должна начинаться с курсом мира); в итог — при ALIGN='position'.
+    A_se3 — то же с полным совмещением начальной позы (перенос+поворот, ТЗ 6.2); в итог — при ALIGN='pose' (по умолчанию).
     B — перемещение в системе начала участка своей траектории (оценка — в своей, истина — в своей).
     Ошибка участка = |Δp_оценки − Δp_истины| / длина пути участка; итог — среднее по участкам."""
     sel = (gt['stamp'] >= t0) & (gt['stamp'] <= t1)
@@ -258,7 +265,8 @@ def rpe(gt, od, t0, t1):
     if out['segments']:
         for key in ('A', 'B', 'A_se3'):
             out[key + '_mean'] = float(np.mean([s[key] for s in out['segments']]))
-        out['worst'] = max(out['A_mean'], out['B_mean'])
+        out['align'] = ALIGN
+        out['worst'] = max(out['A_se3_mean'] if ALIGN == 'pose' else out['A_mean'], out['B_mean'])
     out['n_segments'] = len(out['segments'])
     return out
 
@@ -298,7 +306,7 @@ def evaluate(rec, ph, meta):
     so, st = stream_checks('/odom', od, t0, t1), stream_checks('TF odom->trunk', tf, t0, t1, STAMP_VS_CLOCK_TF_S)
     res['odom'], res['tf'] = so, st
     res['tf_other_parents_for_trunk'] = rec.get('tf_other', {})
-    res['consistency'] = consistency(od, tf)
+    res['consistency'] = consistency(od, tf, t0, t1)
     res['rpe'] = rpe(gt, od, ph['eval0'], min(ph['drift0'], t1))
     res['drift'] = drift(od, gt, ph['drift0'], ph['drift1'])
     if ph.get('rpe_na'):
@@ -387,10 +395,13 @@ def summary_text(res):
     L.append(f"  согласованность: {c['matched_same_stamp']}/{c['odom_msgs']} с тем же stamp, "
              f"Δp {fmt(c['max_pos_diff_m'], 6)} м, Δθ {fmt(c['max_ang_diff_deg'], 4)}°")
     L.append(f"  RPE ({r.get('n_segments', 0)} участков, путь {fmt(r.get('path_len_m'), 2)} м, нет оценки: "
-             f"{r['missing']}): A {fmt(r['A_mean'] and r['A_mean'] * 100, 1)} %, B {fmt(r['B_mean'] and r['B_mean'] * 100, 1)}"
-             f" %, худший {fmt(r['worst'] and r['worst'] * 100, 1)} %  (A с поворотом совмещения "
+             f"{r['missing']}, совмещение {r.get('align', ALIGN)}): A-перенос {fmt(r['A_mean'] and r['A_mean'] * 100, 1)} %, B {fmt(r['B_mean'] and r['B_mean'] * 100, 1)}"
+             f" %, худший {fmt(r['worst'] and r['worst'] * 100, 1)} %  (A-поза "
              f"{fmt(r['A_se3_mean'] and r['A_se3_mean'] * 100, 1)} %, курс оценки на старте отличается на "
              f"{fmt(r.get('align_yaw_offset_deg'), 2)}°)")
+    if r.get('align', ALIGN) == 'pose' and r['A_mean'] is not None and r['A_mean'] > STAGE3['rpe']:
+        L.append(f"  ВНИМАНИЕ: без поворота совмещения A = {r['A_mean'] * 100:.1f} % — оценка стартует не с мировым курсом "
+                 f"(разница {fmt(r.get('align_yaw_offset_deg'), 1)}°); опасно, если Judge совмещает только положение")
     L.append(f"  дрейф [{d['t0']:.1f}; {d['t1']:.1f}] с: {fmt(d['pos_m'], 4)} м, {fmt(d['ang_deg'], 3)}° полный, "
              f"курс {fmt(d['yaw_deg'], 3)}°  (истина: {fmt(d.get('gt_pos_m'), 4)} м, {fmt(d.get('gt_ang_deg'), 3)}°)")
     fb = res.get('forbidden') or {}
@@ -855,7 +866,11 @@ def main():
     ra.add_argument('record')
     for s in (lv, bg, ra):
         s.add_argument('--out', default=None)
+        s.add_argument('--align', choices=['pose', 'position'], default='pose',
+                       help='совмещение начальной позы для RPE A: pose (ТЗ 6.2) или position (строже)')
     args = ap.parse_args()
+    global ALIGN
+    ALIGN = args.align
 
     if args.mode == 'reanalyze':
         rec, ph, meta = load_rec(args.record)
