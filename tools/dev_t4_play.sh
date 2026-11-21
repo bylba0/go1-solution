@@ -6,6 +6,8 @@
 #   tools/dev_t4_play.sh ~/ros2_ws/data/t4_bags/t4_A_square_left [RATE=4] [ROS_DOMAIN_ID=41] [OUT_DIR=/tmp/t4_play]
 # Окружение DDS — как для связи с контейнерами: RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, CYCLONEDDS_URI (если задан).
 BAG=${1:?bag}; RATE=${2:-4}; export ROS_DOMAIN_ID=${3:-41}; OUT=${4:-/tmp/t4_play}
+# set -m: иначе фоновые процессы bash без управления заданиями игнорируют SIGINT и узел не останавливается
+set -m
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 NAME=$(basename "${BAG%/}")
 # shellcheck disable=SC1091
