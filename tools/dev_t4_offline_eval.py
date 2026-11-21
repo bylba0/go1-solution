@@ -5,8 +5,9 @@
 
 Режимы:
   replay  — прогон go1_odometry.core по входам bag (таймер 200 Гц sim, выход 50 Гц), без ROS-графа (быстро):
-            python3 tools/dev_t4_offline_eval.py replay ~/ros2_ws/data/t4_bags/t4_A_square_left [--cache DIR] [--set k=v ...]
-  odom    — оценка /odom, записанного с живого узла (ros2 bag play --clock входов + узел + ros2 bag record /odom /tf):
+            python3 tools/dev_t4_offline_eval.py replay ~/ros2_ws/data/t4_bags/t4_A_square_left \\
+                [--cache DIR] [--set k=v ...]
+  odom    — оценка /odom, записанного с живого узла (tools/dev_t4_play.sh: bag play входов + узел + record):
             python3 tools/dev_t4_offline_eval.py odom <исходный_bag> <bag_с_/odom>
 Метрики: RPE по участкам пути GT ≈ 1 м (|Δp_est − Δp_gt| / длина участка, xy), дрейф на последней стоянке
 (окно 10 с и вся стоянка), частота /odom по sim-времени, число NaN.
@@ -153,13 +154,22 @@ def evaluate(est, gt, seg_len=1.0, still_win=10.0):
 
 
 def read_odom(bag):
-    out, nan = [], 0
-    for _, m, _ in read_bag(bag, ['/odom']):
+    """/odom из записи + сверка TF odom→trunk: число сообщений и совпадение stamp/позы с /odom."""
+    out, nan, tf = [], 0, {}
+    for topic, m, _ in read_bag(bag, ['/odom', '/tf']):
+        if topic == '/tf':
+            for tr in m.transforms:
+                if tr.header.frame_id == 'odom' and tr.child_frame_id == 'trunk':
+                    v = tr.transform.translation
+                    tf[_st(tr.header.stamp)] = (v.x, v.y, v.z)
+            continue
         p, o = m.pose.pose.position, m.pose.pose.orientation
         row = [_st(m.header.stamp), p.x, p.y, p.z, o.x, o.y, o.z, o.w]
         if not all(math.isfinite(v) for v in row):
             nan += 1
         out.append(row)
+    same = sum(1 for r in out if tf.get(r[0]) == tuple(r[1:4]))
+    print(f'/odom {len(out)}, TF odom→trunk {len(tf)}, совпали stamp+поза {same}')
     return np.array(out), nan
 
 

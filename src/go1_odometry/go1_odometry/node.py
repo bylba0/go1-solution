@@ -1,6 +1,6 @@
 """T4: узел одометрии Go1 → /odom (odom → trunk) и TF odom → trunk.
 
-Подписки (только эти; список проверяется тестом test_subscriptions.py):
+Подписки (только эти; список проверяется тестом test/test_node.py):
   /imu/data (sensor_msgs/Imu), /joint_states (sensor_msgs/JointState), /clock (через use_sim_time),
   /foot_force (std_msgs/Float32MultiArray) — только при use_foot_force:=true.
 Колбэки только сохраняют последнее сообщение; расчёт — на таймере update_rate (sim), публикация — publish_rate (sim).
@@ -21,7 +21,8 @@ from tf2_msgs.msg import TFMessage
 
 from .core import DEFAULTS, JOINT_NAMES, LEGS, OdometryEstimator, all_finite
 
-# Разрешённые входы узла. Любая другая подписка (в т.ч. /cmd_vel, истина, /gazebo/*, контакты Gazebo, камеры) — нарушение.
+# Разрешённые входы узла. Любая другая подписка (в т.ч. /cmd_vel, истина, /gazebo/*, контакты Gazebo,
+# камеры) — нарушение.
 ALLOWED_INPUT_TOPICS = ('/imu/data', '/joint_states', '/clock', '/foot_force')
 
 SENSOR_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE,

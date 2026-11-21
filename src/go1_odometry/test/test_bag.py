@@ -1,6 +1,7 @@
 """Тесты T4 на записанных bag живого сима (docs/T4_RECON.md). Каталог bag — переменная окружения GO1_T4_BAGS
 (в нём t4_A_square_left/, t4_D_startup/); без неё или без rosbag2_py тесты пропускаются.
-Истина (/odom/ground_truth) здесь НЕ читается: проверяются FK против TF robot_state_publisher, стоянка и мягкий старт."""
+Истина (/odom/ground_truth) здесь НЕ читается: проверяются FK против TF robot_state_publisher,
+стоянка и мягкий старт."""
 import math
 import os
 import pathlib

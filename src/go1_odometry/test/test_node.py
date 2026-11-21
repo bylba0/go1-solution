@@ -136,7 +136,8 @@ def test_odom_and_tf_format_rate_and_nan_inputs():
             assert tr.header.frame_id == 'odom' and tr.child_frame_id == 'trunk'
             assert tr.header.stamp == od.header.stamp
             p, q = od.pose.pose.position, od.pose.pose.orientation
-            assert (tr.transform.translation.x, tr.transform.translation.y, tr.transform.translation.z) == (p.x, p.y, p.z)
+            v = tr.transform.translation
+            assert (v.x, v.y, v.z) == (p.x, p.y, p.z)
             assert (tr.transform.rotation.x, tr.transform.rotation.w) == (q.x, q.w)
             vals = [p.x, p.y, p.z, q.x, q.y, q.z, q.w] + list(od.pose.covariance) + list(od.twist.covariance)
             assert all(math.isfinite(v) for v in vals)
