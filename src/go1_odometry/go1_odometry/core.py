@@ -108,6 +108,8 @@ def all_finite(*arrs):
 
 DEFAULTS = {
     'orientation_mode': 'imu',      # imu — кватернион /imu/data; gyro — интегрирование угловой скорости (запасной)
+    'heading_reference': 'world',   # world — курс = мировой yaw IMU с первого сообщения (не зависит от того, совмещает ли
+                                    # Judge только положение или и курс); initial — курс относительно начального (старт с 0)
     'stance_height': 0.005,         # м: вес опоры ноги w = 1 − Δh / stance_height, Δh — высота над самой низкой стопой
     'zupt_foot_speed': 0.01,        # м/с: макс. скорость стопы относительно trunk для «стоим»
     'zupt_ang_speed': 0.02,         # рад/с: макс. угловая скорость (по разности ориентаций) для «стоим»
@@ -131,6 +133,8 @@ class OdometryEstimator:
         p.update(params)
         if p['orientation_mode'] not in ('imu', 'gyro'):
             raise ValueError("orientation_mode: 'imu' | 'gyro'")
+        if p['heading_reference'] not in ('world', 'initial'):
+            raise ValueError("heading_reference: 'world' | 'initial'")
         self.p = p
         # входы (последние валидные)
         self._imu_q = None
@@ -139,7 +143,7 @@ class OdometryEstimator:
         self._contacts = None
         self._contacts_t = None
         # состояние
-        self._yaw0_inv = None          # кватернион −yaw0: курс относительно начального
+        self._yaw0_inv = None          # кватернион −yaw0 (initial) или единичный (world)
         self._gyro_q = None            # ориентация в режиме gyro
         self._gyro_t = None
         self.orientation = None        # (x, y, z, w) odom ← trunk
@@ -198,7 +202,8 @@ class OdometryEstimator:
         if qw is None:
             return False
         if self._yaw0_inv is None:
-            self._yaw0_inv = quat_from_yaw(-quat_yaw(qw))
+            self._yaw0_inv = (quat_from_yaw(-quat_yaw(qw)) if self.p['heading_reference'] == 'initial'
+                              else np.array([0.0, 0.0, 0.0, 1.0]))
         orient = quat_normalize(quat_mul(self._yaw0_inv, qw))
         if orient is None:
             return self.orientation is not None

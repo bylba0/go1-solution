@@ -59,7 +59,7 @@ def _imu_quat(yaw, roll=0.0, pitch=0.0):
 
 
 def test_orientation_relative_to_initial_yaw_and_normalized():
-    est = OdometryEstimator()
+    est = OdometryEstimator(heading_reference='initial')
     est.set_imu(0.0, 2.0 * _imu_quat(0.7), (0, 0, 0))      # ненормированный вход
     est.set_joints(0.0, STAND_Q)
     assert est.step(0.0)
@@ -69,6 +69,33 @@ def test_orientation_relative_to_initial_yaw_and_normalized():
     est.step(0.01)
     assert abs(quat_yaw(est.orientation) - 0.3) < 1e-6
     assert abs(np.linalg.norm(est.orientation) - 1) < 1e-12
+
+
+def test_heading_world_by_default_starts_with_imu_yaw():
+    """Стартовый курс = мировой yaw IMU (не 0): RPE не зависит от того, совмещает ли Judge курс."""
+    est = OdometryEstimator()
+    assert est.p['heading_reference'] == 'world'
+    est.set_imu(0.0, 2.0 * _imu_quat(0.7, roll=0.02), (0, 0, 0))
+    est.set_joints(0.0, STAND_Q)
+    assert est.step(0.0)
+    assert abs(quat_yaw(est.orientation) - 0.7) < 1e-9
+    assert abs(np.linalg.norm(est.orientation) - 1) < 1e-12
+    est.set_imu(0.01, _imu_quat(0.7 + 0.3), (0, 0, 0))
+    est.step(0.01)
+    assert abs(quat_yaw(est.orientation) - 1.0) < 1e-6
+
+
+def test_heading_world_gyro_mode_starts_with_imu_yaw():
+    est = OdometryEstimator(orientation_mode='gyro')
+    est.set_imu(0.0, _imu_quat(-1.2), (0, 0, 0))
+    est.set_joints(0.0, STAND_Q)
+    assert est.step(0.0)
+    assert abs(quat_yaw(est.orientation) + 1.2) < 1e-9
+
+
+def test_heading_reference_validated():
+    with pytest.raises(ValueError):
+        OdometryEstimator(heading_reference='north')
 
 
 def test_no_pose_before_imu_and_initial_height():
