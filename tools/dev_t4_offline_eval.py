@@ -134,7 +134,8 @@ def replay_lidar(d, timer_hz=200.0, pub_hz=50.0, leg_scale=1.0):
     ms = np.array(est.scan_ms)
     if len(ms):
         print(f'сканы: {est.n_scans_in}, сопоставлено {est.core.n_match}, пропущено {est.core.n_skip}, '
-              f'опорных {est.core.n_key}, вырожд. {est.core.n_degen}; обработка {ms.mean():.1f} мс ср, {ms.max():.1f} макс',
+              f'опорных {est.core.n_key}, вырожд. {est.core.n_degen}; '
+              f'обработка {ms.mean():.1f} мс ср, {ms.max():.1f} макс',
               file=sys.stderr)
     return np.array(out)
 
