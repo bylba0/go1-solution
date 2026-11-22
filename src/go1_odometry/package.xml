@@ -6,6 +6,7 @@
   <description>Hackathon Go1, T4: оценка /odom и TF odom→trunk — ориентация из /imu/data, положение — кинематика опорных ног по /joint_states.</description>
   <maintainer email="176760298+bylba0@users.noreply.github.com">bylba0</maintainer>
   <license>MIT</license>
+  <license>BSD-3-Clause</license>  <!-- go1_odometry/lidar_core.py: ядро режима lidar (источник — в его заголовке) -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
