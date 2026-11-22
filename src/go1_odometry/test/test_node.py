@@ -315,3 +315,49 @@ def test_lidar_slow_matching_does_not_delay_publication():
         assert max(b - a for a, b in zip(stamps, stamps[1:])) <= 0.0201
     finally:
         node.destroy_node()
+
+
+def test_lidar_fallback_to_legs_without_scans_and_back():
+    """Сканы пропали на 3 с: источник legs (после scan_timeout 1 с sim), потом снова lidar; /odom без пропусков
+    и скачков; в диагностике — источник, число переключений, время без сканов."""
+    node = _node(use_sim_time=True, **LIDAR)
+    cap = _Capture(node)
+    lines = []
+
+    class _Log:
+        def info(self, m, **_):
+            lines.append(m)
+
+        def error(self, m, **_):
+            lines.append(m)
+    node.get_logger = _Log
+    src = []
+    try:
+        def feed(t):
+            node._on_imu(_imu(t))
+            node._on_joints(_joints(t))
+            if round(t * 200) % 10 == 0 and not 3.0 <= t < 6.0:
+                node._on_scan(_scan(t))
+            src.append(node.fb.source)
+        _run(node, cap, 1.0, 4.5, feed)
+        assert node.fb.source == 'legs' and node.fb.switches == 1
+        node._diag()
+        assert 'источник legs' in lines[-1] and 'переключений 1' in lines[-1] and 'без сканов 1.' in lines[-1]
+        _run(node, cap, 4.5, 8.0, feed)
+        assert node.fb.source == 'lidar' and node.fb.switches == 2
+        node._diag()
+        assert 'источник lidar' in lines[-1] and 'переключений 2' in lines[-1]
+        stamps = [o.header.stamp.sec + o.header.stamp.nanosec * 1e-9 for o in cap.odom]
+        assert max(b - a for a, b in zip(stamps, stamps[1:])) <= 0.0201
+        xy = [(o.pose.pose.position.x, o.pose.pose.position.y) for o in cap.odom]
+        assert max(math.dist(a, b) for a, b in zip(xy, xy[1:])) < 0.004      # стоим: скачков нет
+        for o in cap.odom:
+            q = o.pose.pose.orientation
+            assert abs(math.sqrt(q.x ** 2 + q.y ** 2 + q.z ** 2 + q.w ** 2) - 1) < 1e-9
+    finally:
+        node.destroy_node()
+
+
+def test_lidar_requires_world_heading():
+    with pytest.raises(ValueError):
+        _node(use_sim_time=True, **LIDAR, **{'estimator.heading_reference': 'initial'})

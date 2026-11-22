@@ -4,6 +4,8 @@
   legs  — core.OdometryEstimator: ориентация IMU + кинематика опорных ног;
   lidar — lidar_mode.LidarEstimator (ядро lidar_core): ориентация IMU + сопоставление сканов /scan + прогноз по ногам;
           z и угловая скорость — от legs-оценщика, который в этом режиме тоже считается (кинематика, дёшево).
+          Страховка (fallback.LidarFallback): /scan не приходил дольше estimator.scan_timeout с sim (или поза рабочего
+          потока старше) — xy ведётся приращениями legs от последнего выхода; сканы вернулись — плавный возврат к lidar.
 Подписки (только эти; список проверяется тестом test/test_node.py):
   /imu/data (sensor_msgs/Imu), /joint_states (sensor_msgs/JointState), /clock (через use_sim_time),
   legs:  /foot_force (std_msgs/Float32MultiArray) — только при use_foot_force:=true;
@@ -34,6 +36,7 @@ from std_msgs.msg import Float32MultiArray  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
 from .core import DEFAULTS, JOINT_NAMES, LEGS, OdometryEstimator, all_finite, quat_to_rot  # noqa: E402
+from .fallback import LidarFallback  # noqa: E402
 from .lidar_mode import LIDAR_JOINT_NAMES, LidarEstimator  # noqa: E402
 
 # Разрешённые входы узла по режимам. Любая другая подписка (в т.ч. /cmd_vel, истина, /gazebo/*, контакты Gazebo,
@@ -81,7 +84,15 @@ class OdometryNode(Node):
         for k, v in DEFAULTS.items():
             est_params[k] = dp('estimator.' + k, v).value
         self.est = OdometryEstimator(**est_params)
+        fb_params = dict(
+            scan_timeout=float(dp('estimator.scan_timeout', 1.0).value),
+            blend_tau=float(dp('estimator.fallback_blend_tau', 1.0).value),
+            resume_delay=float(dp('estimator.fallback_resume_delay', 0.5).value),
+            max_correction=float(dp('estimator.fallback_max_correction', 0.25).value))
         lidar = self.mode == 'lidar'
+        if lidar and self.est.p['heading_reference'] != 'world':
+            raise ValueError('estimator.mode=lidar: курс ядра — мировой yaw IMU, нужен heading_reference=world '
+                             '(иначе страховка по legs сменит курс)')
         if lidar and self.use_foot_force:
             raise ValueError('estimator.mode=lidar: /foot_force не используется (use_foot_force должен быть false)')
         allowed = ALLOWED_INPUT_TOPICS_LIDAR if lidar else ALLOWED_INPUT_TOPICS
@@ -104,6 +115,8 @@ class OdometryNode(Node):
             self.create_subscription(Float32MultiArray, self.foot_force_topic, self._on_foot_force, SENSOR_QOS)
         # режим lidar: входы рабочему потоку — очередь событий; выход — последняя готовая поза (замена кортежа)
         self.lidar = LidarEstimator(leg_scale=leg_scale) if lidar else None
+        self.fb = LidarFallback(**fb_params) if lidar else None
+        self._t_scan = None            # sim-время прихода последнего скана (по часам узла, не по штампу)
         self._lidar_in = deque(maxlen=20000)
         self._lidar_pose = None        # (t, xy, quat) — последняя поза рабочего потока
         self._lidar_prev = None        # (t, xy) прошлой опубликованной — для линейной скорости
@@ -149,7 +162,10 @@ class OdometryNode(Node):
         self._js_msg = msg
 
     def _on_scan(self, msg):
-        self._lidar_in.append(('scan', _stamp_to_sec(msg.header.stamp), np.asarray(msg.ranges, dtype=np.float32),
+        ts = _stamp_to_sec(msg.header.stamp)
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._t_scan = now if now > 0.0 else ts      # время прихода по sim; до первого /clock — штамп скана
+        self._lidar_in.append(('scan', ts, np.asarray(msg.ranges, dtype=np.float32),
                                msg.angle_min, msg.angle_increment))
         self._wake.set()
 
@@ -264,14 +280,26 @@ class OdometryNode(Node):
             self.get_logger().error(f'lidar: {type(e).__name__}: {e}', throttle_duration_sec=1.0)
 
     def _lidar_output(self, t):
-        """Поза для публикации: xy и ориентация — рабочего потока (последняя готовая), z и ω — legs-оценщика."""
+        """Поза для публикации: xy — страховки (поза рабочего потока, последняя готовая, или приращения legs без
+        сканов), ориентация — кватернион IMU (мировой курс у обоих оценщиков), z и ω — legs-оценщика."""
         snap = self._lidar_pose
-        if snap is None:
+        if snap is not None:
+            age = t - snap[0]
+            self._age_max[0], self._age_max[1] = max(self._age_max[0], age), max(self._age_max[1], age)
+        xy_out = self.fb.update(t, None if snap is None else snap[1], self.est.position[:2], self._t_scan,
+                                None if snap is None else snap[0])
+        if xy_out is None:
+            return False
+        if self.fb.source == 'legs' or snap is None:
+            self._lidar_prev = None
+            quat, lin = self.est.orientation, self.est.lin_vel
+            pos = np.array([xy_out[0], xy_out[1], self.est.position[2]])
+            if all_finite(pos, quat, lin, self.est.ang_vel) and abs(float(np.linalg.norm(quat)) - 1.0) < 1e-6:
+                self._last_valid = (pos, np.array(quat), lin.copy(), self.est.ang_vel.copy())
+                return True
             return False
         ts, xy, quat = snap
-        age = t - ts
-        self._age_max[0], self._age_max[1] = max(self._age_max[0], age), max(self._age_max[1], age)
-        pos = np.array([xy[0], xy[1], self.est.position[2]])
+        pos = np.array([xy_out[0], xy_out[1], self.est.position[2]])
         prev = self._lidar_prev
         if prev is not None and ts > prev[0]:
             v_world = np.array([(xy[0] - prev[1][0]) / (ts - prev[0]), (xy[1] - prev[1][1]) / (ts - prev[0]), 0.0])
@@ -299,6 +327,8 @@ class OdometryNode(Node):
                     + (f'{ms.mean():.1f} мс ср, {ms.max():.1f} макс' if len(ms) else '—')
                     + f'; возраст позы макс {1000 * self._age_max[0]:.0f} мс sim (всего {1000 * self._age_max[1]:.0f})'
                     + f'; очередь {len(self._lidar_in)}; отброшено {self.lidar.rejected}; ошибок {self._lidar_errors}')
+            fb, t = self.fb, self.get_clock().now().nanoseconds * 1e-9
+            msg += (f'; источник {fb.source}, переключений {fb.switches}, без сканов {fb.no_scan_s(t, self._t_scan):.1f} с sim')
         self.get_logger().info(msg)
         self._gap_wall[0] = self._gap_stamp[0] = self._timer_max[0] = self._age_max[0] = 0.0
 

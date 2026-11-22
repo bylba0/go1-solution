@@ -23,7 +23,16 @@ go1_odometry:
       worker_thread: true       # сопоставление сканов в отдельном потоке (false — синхронно, только для тестов)
     estimator:
       mode: lidar               # legs — IMU + кинематика ног; lidar — IMU + /scan + ноги (lidar_core); launch: estimator_mode:=lidar
-      orientation_mode: imu     # imu — кватернион /imu/data; gyro — запасной (интегрирование угловой скорости)
+      # Страховка режима lidar (go1_odometry/fallback.py; в legs не действует), всё — по sim time:
+      scan_timeout: 1.0              # с: /scan не приходил дольше (или поза ядра старше) — xy по приращениям legs
+                                     # от последнего выхода (без скачка); 1 с = 20 пропущенных сканов при 20 Гц
+      fallback_resume_delay: 0.5     # с: сканы снова идут столько — возврат к lidar (ядро успевает само сопоставить
+                                     # первые сканы и ввести свою поправку, BLEND_TAU 0,2 с)
+      fallback_blend_tau: 1.0        # с: постоянная экспоненциального ввода поправки при возврате (lidar − наш выход);
+                                     # 1 с: поправка 0,25 м вводится не быстрее 0,25 м/с — без рывка за тик 50 Гц
+      fallback_max_correction: 0.25  # м: поправка больше — не вводится (ядро правит расхождение лишь в пределах
+                                     # PAIR_DIST 0,3 м; дальше его абсолютная поза сомнительна): lidar ведёт приращения
+      orientation_mode: imu    # imu — кватернион /imu/data; gyro — запасной (интегрирование угловой скорости)
       heading_reference: world  # world — стартовый курс = мировой yaw IMU; initial — курс от 0 на старте
       stance_height: 0.005
       zupt_foot_speed: 0.01
