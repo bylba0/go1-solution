@@ -24,7 +24,8 @@ import sys
 import pytest
 
 BAGS = pathlib.Path(os.environ.get('GO1_T4_BAGS', '/nonexistent'))
-TOOLS = pathlib.Path(__file__).resolve().parents[3] / 'tools'
+_UP = pathlib.Path(__file__).resolve().parents
+TOOLS = (_UP[3] if len(_UP) > 3 else _UP[-1]) / 'tools'    # в образе пакет смонтирован в /src — tools нет
 ADD_MAX = 0.0055
 NEAR_MAX = 0.012
 
