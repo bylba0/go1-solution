@@ -79,11 +79,11 @@ TF `odom → trunk` с частотой 50 Гц sim. Истину и `/cmd_vel` 
 
 | Режим | Ориентация | Положение | Подписки |
 |---|---|---|---|
-| `legs` (сейчас по умолчанию) | кватернион `/imu/data` (мировой курс) | кинематика опорных ног по `/joint_states` | `/imu/data`, `/joint_states`, `/clock` (+ `/foot_force`, если включён) |
+| `legs` (запасной) | кватернион `/imu/data` (мировой курс) | кинематика опорных ног по `/joint_states` | `/imu/data`, `/joint_states`, `/clock` (+ `/foot_force`, если включён) |
 | `lidar` | кватернион `/imu/data` (мировой курс) | сопоставление сканов `/scan` + прогноз по ногам (ядро `lidar_core.py`, источник и лицензия — в его заголовке) | `/imu/data`, `/joint_states`, `/clock`, `/scan` (RELIABLE) |
 
 Переключение: `estimator.mode: lidar` в `src/go1_odometry/config/odometry.yaml` или без правки файла —
-`ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. По умолчанию станет `lidar` после приёмки режима; пока — `legs`.
+`ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. По умолчанию — `lidar` (принят 22.11: худший RPE 3,4 %, bag B 1,1 %); `legs` — запасной.
 Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
 результаты прогонов — [docs/T4_REPORT.md](docs/T4_REPORT.md).
 
