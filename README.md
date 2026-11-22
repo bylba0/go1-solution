@@ -74,16 +74,22 @@ NaN/Inf, обрыв входа) и пороги взяты из текста Т�
 ## Проверка T4
 
 Узел `go1_odometry` (`/entrypoint.sh T4` → `go1_bringup/launch/t4.launch.py`) публикует `/odom` (`odom → trunk`) и
-TF `odom → trunk` с частотой 50 Гц sim. Ориентация — кватернион `/imu/data` (мировой курс), положение — кинематика
-опорных ног по `/joint_states`. Подписки — только `/imu/data`, `/joint_states`, `/clock` (и `/foot_force`, если включён
-параметром); истину и `/cmd_vel` решение не использует. Второй режим — `estimator.mode: lidar` (по умолчанию выключен): ориентация
-IMU + сопоставление сканов `/scan` + прогноз по ногам (ядро `lidar_core.py`, источник и лицензия — в его заголовке);
-включение без правки файла — `ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
+TF `odom → trunk` с частотой 50 Гц sim. Истину и `/cmd_vel` решение не использует. Два режима оценщика (параметр
+`estimator.mode`):
+
+| Режим | Ориентация | Положение | Подписки |
+|---|---|---|---|
+| `legs` (сейчас по умолчанию) | кватернион `/imu/data` (мировой курс) | кинематика опорных ног по `/joint_states` | `/imu/data`, `/joint_states`, `/clock` (+ `/foot_force`, если включён) |
+| `lidar` | кватернион `/imu/data` (мировой курс) | сопоставление сканов `/scan` + прогноз по ногам (ядро `lidar_core.py`, источник и лицензия — в его заголовке) | `/imu/data`, `/joint_states`, `/clock`, `/scan` (RELIABLE) |
+
+Переключение: `estimator.mode: lidar` в `src/go1_odometry/config/odometry.yaml` или без правки файла —
+`ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. По умолчанию станет `lidar` после приёмки режима; пока — `legs`.
+Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
 результаты прогонов — [docs/T4_REPORT.md](docs/T4_REPORT.md).
 
 ```bash
 # unit-тесты расчёта без ROS (на хосте, нужен numpy)
-cd src/go1_odometry && python3 -m pytest test/test_core.py -q && cd -
+cd src/go1_odometry && python3 -m pytest -q test/test_core.py test/test_lidar_core.py test/test_lidar_mode.py test/test_lidar_scenarios.py && cd -
 # все тесты пакета — в образе
 docker run --rm --network none --mount type=bind,src=$PWD/src/go1_odometry,dst=/src,readonly --entrypoint bash \
   go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
