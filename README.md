@@ -84,12 +84,15 @@ TF `odom → trunk` с частотой 50 Гц sim. Истину и `/cmd_vel` 
 
 Переключение: `estimator.mode: lidar` в `src/go1_odometry/config/odometry.yaml` или без правки файла —
 `ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. По умолчанию — `lidar` (принят 22.11: худший RPE 3,4 %, bag B 1,1 %); `legs` — запасной.
+Страховка режима lidar: если `/scan` не приходит дольше 1,0 с sim, xy ведётся приращениями нашего legs-оценщика от
+последней позы (без скачка), при возврате сканов — плавный возврат к lidar (`fallback.py`, параметры
+`estimator.scan_timeout`, `estimator.fallback_*`). Офлайн bag B: без сканов 10,0 % (= legs), пропадание 15 с — 4,4 %.
 Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
 результаты прогонов — [docs/T4_REPORT.md](docs/T4_REPORT.md).
 
 ```bash
 # unit-тесты расчёта без ROS (на хосте, нужен numpy)
-cd src/go1_odometry && python3 -m pytest -q test/test_core.py test/test_lidar_core.py test/test_lidar_mode.py test/test_lidar_scenarios.py && cd -
+cd src/go1_odometry && python3 -m pytest -q test/test_core.py test/test_lidar_core.py test/test_lidar_mode.py test/test_lidar_scenarios.py test/test_fallback.py && cd -
 # все тесты пакета — в образе
 docker run --rm --network none --mount type=bind,src=$PWD/src/go1_odometry,dst=/src,readonly --entrypoint bash \
   go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
