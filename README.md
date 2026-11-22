@@ -76,7 +76,9 @@ NaN/Inf, обрыв входа) и пороги взяты из текста Т�
 Узел `go1_odometry` (`/entrypoint.sh T4` → `go1_bringup/launch/t4.launch.py`) публикует `/odom` (`odom → trunk`) и
 TF `odom → trunk` с частотой 50 Гц sim. Ориентация — кватернион `/imu/data` (мировой курс), положение — кинематика
 опорных ног по `/joint_states`. Подписки — только `/imu/data`, `/joint_states`, `/clock` (и `/foot_force`, если включён
-параметром); истину и `/cmd_vel` решение не использует. Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
+параметром); истину и `/cmd_vel` решение не использует. Второй режим — `estimator.mode: lidar` (по умолчанию выключен): ориентация
+IMU + сопоставление сканов `/scan` + прогноз по ногам (ядро `lidar_core.py`, источник и лицензия — в его заголовке);
+включение без правки файла — `ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar`. Устройство, параметры и риски — [docs/T4_DESIGN.md](docs/T4_DESIGN.md),
 результаты прогонов — [docs/T4_REPORT.md](docs/T4_REPORT.md).
 
 ```bash

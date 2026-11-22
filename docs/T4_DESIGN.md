@@ -73,6 +73,24 @@ Judge сам ведёт робота (Gazebo Classic 11 + CHAMP, Highlevel, `/cm
   публикуется только поза с конечными числами и |q| = 1 ± 1e-6.
 - Переменные DDS (`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`, `ROS_LOCALHOST_ONLY`) не трогает.
 
+### Режим lidar (`estimator.mode: lidar`; по умолчанию `legs`)
+- **Ядро** `lidar_core.py` — перенос ядра Артёма (ветка `personal/t4`, 5062eb2, `solution/ros_ws/src/go1_odom/go1_odom/core.py`,
+  BSD-3-Clause) без изменения кода; правка — только заголовок с источником. Курс, крен, тангаж — кватернион IMU (мировой
+  yaw); перенос xy — сопоставление скана с опорным «точка–прямая» (сдвиг 2D, поворот точек из IMU, ≤ 8 итераций,
+  вырожденные оси — прогноз); между сканами — прогноз по опорным ногам; стоянка (размах ориентации < 0,5° за 0,3 с)
+  замораживает выход. Узел источника (`odom_node.py`, подписан на `/go1_contacts`) не переносился.
+- **Опора без контактов**: `on_contact` не вызывается, поэтому ядро всегда берёт опору по высоте стоп — нога опорная,
+  если её стопа (в мировых осях) не выше самой низкой на `CONTACT_Z = 0,02 м` (тест `test_stance_by_foot_height_without_contacts`).
+- **Обёртка** `lidar_mode.py`: отбрасывает NaN/Inf и неверную форму входов, раскладывает суставы по именам в порядок ядра
+  FL, FR, RL, RR (у legs — FR, FL, RR, RL), подаёт события пакетом по штампам, меряет время обработки сканов.
+- **Узел**: входы — `/imu/data`, `/joint_states`, `/scan` (QoS **RELIABLE**: BEST_EFFORT-подписка от сима ничего не
+  получает), `/clock`; `/foot_force` в этом режиме запрещён параметром. Колбэки только кладут сообщение (IMU и сканы — в
+  очередь, суставы — последнее). Сопоставление сканов — в **отдельном рабочем потоке**: таймер 200 Гц sim передаёт ему
+  входы и тик, не ждёт и публикует последнюю готовую позу (xy и кватернион — ядра; z и угловая скорость — legs-оценщика,
+  который в этом режиме тоже считается; линейная скорость — разность поз ядра в осях trunk).
+- Включение без смены дефолта: `ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar` или `estimator.mode: lidar`
+  в файле параметров.
+
 ### Параметры `config/odometry.yaml`
 | Параметр | Значение | Зачем |
 |---|---|---|
@@ -85,6 +103,11 @@ Judge сам ведёт робота (Gazebo Classic 11 + CHAMP, Highlevel, `/cm
 | `foot_force_order` | `[FL, FR, RL, RR]` | порядок каналов `/foot_force` (подобран по корреляции с кинематикой на bag A) |
 | `foot_force_threshold` | 5,0 | порог «нога в опоре» по `/foot_force` |
 | `pose_covariance_diagonal`, `twist_covariance_diagonal` | см. файл | ковариации в `/odom` (ТЗ их не оценивает) |
+| `estimator.mode` | `legs` | `legs` — кинематика ног; `lidar` — ядро `lidar_core` (IMU + `/scan` + ноги), см. «Режим lidar» |
+| `scan_topic` | `/scan` | только в режиме lidar |
+| `lidar.leg_scale` | 1,0 | множитель пути по ногам в прогнозе ядра lidar |
+| `lidar.worker_thread` | `true` | сопоставление сканов в рабочем потоке (`false` — синхронно, только для тестов) |
+| `diag_period` | 10 с wall | строка диагностики: паузы `/odom` (wall, stamp), длительность таймера, сканы и время сопоставления |
 | `estimator.orientation_mode` | `imu` | кватернион IMU; `gyro` — запасной режим (интегрирование ω), по умолчанию не используется из-за вибрации |
 | `estimator.heading_reference` | `world` | стартовый курс = мировой yaw IMU. Оценка тогда совпадает с миром и при совмещении Judge «поза», и «только положение» (см. раздел 7). `initial` — прежний режим (курс от 0) |
 | `estimator.stance_height` | 0,005 м | мягкий порог «нога в опоре» по высоте над самой низкой стопой. При 0,02 м оценённый путь был занижен до ~0,75 от истинного (вес получали и низкие ноги в переносе, их движение «тормозит» среднее); с 0,005 м в среднее идут практически только стоящие ноги |
@@ -101,8 +124,10 @@ Judge сам ведёт робота (Gazebo Classic 11 + CHAMP, Highlevel, `/cm
 - **Истина** (`/odom/ground_truth`, `/gazebo/*`, model/link states) в решении не читается. Белый список входов —
   `ALLOWED_INPUT_TOPICS = (/imu/data, /joint_states, /clock, /foot_force)` в `node.py`; узел падает при старте, если
   параметром задан другой топик.
-- Тесты `test/test_node.py`: подписки узла ⊆ белого списка (с `/foot_force` и без); `/cmd_vel`, `/odom/ground_truth`,
-  `/go1_contacts/FL` как параметр — отказ; в исходниках пакета нет запрещённых имён (cmd_vel, ground_truth, gazebo,
+- Режим lidar: `ALLOWED_INPUT_TOPICS_LIDAR = (/imu/data, /joint_states, /clock, /scan)`.
+- Тесты `test/test_node.py`: подписки узла ⊆ белого списка в обоих режимах (legs — с `/foot_force` и без; lidar — с
+  `/scan` RELIABLE, без `/foot_force`); `/cmd_vel`, `/cmd_vel_gated`, `/odom/ground_truth`, `/go1_contacts/FL`,
+  `/gazebo/*`, камера как параметр — отказ в обоих режимах; в исходниках пакета нет запрещённых имён (cmd_vel, ground_truth, gazebo,
   go1_contacts, foot_contacts, camera, champ, model_states, link_states) и подписок вне `node.py`.
 - `/cmd_vel` решение не публикует (воспроизведения командной траектории нет).
 - Истина используется **только в стенде** (`tools/judge_t4.py`, `tools/dev_t4_offline_eval.py`) — для метрик и коррекции
