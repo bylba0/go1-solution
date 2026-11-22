@@ -90,6 +90,12 @@ Judge сам ведёт робота (Gazebo Classic 11 + CHAMP, Highlevel, `/cm
   который в этом режиме тоже считается; линейная скорость — разность поз ядра в осях trunk).
 - Включение без смены дефолта: `ros2 launch go1_bringup t4.launch.py estimator_mode:=lidar` или `estimator.mode: lidar`
   в файле параметров.
+- **Офлайн 22.11** (RPE средний / макс, %): replay `tools/dev_t4_offline_eval.py --estimator legs|lidar` — A 3,6/8,3 →
+  1,1/1,8; B 10,0/13,2 → 1,1/2,0; C 3,0/5,7 → 1,1/1,3. Стенд `judge_t4.py bag --cpus 1.0 --rate 1` (образ с
+  `mode: lidar`): A 2,5 % (legs 5,0), B 1,3 % (legs 11,1), C 1,8 % (legs 6,8); дрейф A 0,0002 м / 0,105°, B 0,0001 м /
+  0,030°; 50 Гц, NaN 0, 20/20 (C — 14, нет интервала дрейфа). Сопоставление скана при CPU 1,0: 5–7 мс ср, ≤ 70 мс макс;
+  колбэк таймера ≤ 12 мс wall; разрыв stamp ≤ 25 мс (как у legs); пауза /odom по wall = паузам /clock в записи
+  (≤ 2,0 с); CPU контейнера 14–17 % ср, ≤ 35 % макс (legs — 12 %).
 
 ### Параметры `config/odometry.yaml`
 | Параметр | Значение | Зачем |
