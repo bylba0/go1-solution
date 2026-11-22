@@ -127,6 +127,8 @@ class OdometryNode(Node):
         self._pub_stamp = None
         self._gap_wall = [0.0, 0.0]    # [за период, за всё время], с
         self._gap_stamp = [0.0, 0.0]
+        self._timer_max = [0.0, 0.0]   # длительность колбэка таймера, с wall
+        self._age_max = [0.0, 0.0]     # lidar: возраст позы рабочего потока на публикации, с sim
         self.odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
         self.tf_pub = self.create_publisher(TFMessage, '/tf', TF_QOS) if self.publish_tf else None
         self._next_pub = None
@@ -200,6 +202,12 @@ class OdometryNode(Node):
                 self.est.set_contacts(self._ff_t, [force[leg] > self.foot_force_threshold for leg in LEGS])
 
     def _on_timer(self):
+        w0 = time.monotonic()
+        self._on_timer_body()
+        d = time.monotonic() - w0
+        self._timer_max[0], self._timer_max[1] = max(self._timer_max[0], d), max(self._timer_max[1], d)
+
+    def _on_timer_body(self):
         now = self.get_clock().now()
         t = now.nanoseconds * 1e-9
         if t <= 0.0:
@@ -261,6 +269,8 @@ class OdometryNode(Node):
         if snap is None:
             return False
         ts, xy, quat = snap
+        age = t - ts
+        self._age_max[0], self._age_max[1] = max(self._age_max[0], age), max(self._age_max[1], age)
         pos = np.array([xy[0], xy[1], self.est.position[2]])
         prev = self._lidar_prev
         if prev is not None and ts > prev[0]:
@@ -280,15 +290,17 @@ class OdometryNode(Node):
         self._diag_t = time.monotonic()
         msg = (f'/odom: {self.published} опубликовано, пауза макс wall {1000 * self._gap_wall[0]:.0f} мс '
                f'(всего {1000 * self._gap_wall[1]:.0f}), по stamp {1000 * self._gap_stamp[0]:.0f} мс '
-               f'(всего {1000 * self._gap_stamp[1]:.0f})')
+               f'(всего {1000 * self._gap_stamp[1]:.0f}); таймер макс {1000 * self._timer_max[0]:.1f} мс wall '
+               f'(всего {1000 * self._timer_max[1]:.1f})')
         if self.lidar is not None:
             c, ms = self.lidar.core, np.array(self.lidar.scan_ms)
             msg += (f'; сканы {self.lidar.n_scans_in}: сопоставлено {c.n_match}, пропущено {c.n_skip}, '
                     f'опорных {c.n_key}, вырожд. {c.n_degen}; обработка '
                     + (f'{ms.mean():.1f} мс ср, {ms.max():.1f} макс' if len(ms) else '—')
+                    + f'; возраст позы макс {1000 * self._age_max[0]:.0f} мс sim (всего {1000 * self._age_max[1]:.0f})'
                     + f'; очередь {len(self._lidar_in)}; отброшено {self.lidar.rejected}; ошибок {self._lidar_errors}')
         self.get_logger().info(msg)
-        self._gap_wall[0] = self._gap_stamp[0] = 0.0
+        self._gap_wall[0] = self._gap_stamp[0] = self._timer_max[0] = self._age_max[0] = 0.0
 
     def destroy_node(self):
         self._stop.set()
