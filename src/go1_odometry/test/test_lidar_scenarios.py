@@ -17,7 +17,8 @@ DTH = ANG[1] - ANG[0]
 def walk(T=3.0, v=(0.12, 0.04), w=0.15, scan_ok=lambda t: True, spoil=None, est=None, t0=0.0,
          probe=()):
     """Рысь (опора FL+RR / FR+RL по 0,25 с), корпус едет со скоростью v и поворачивается с w; IMU 200 Гц, суставы
-    250 Гц (порядок ядра, по именам), сканы 20 Гц, если scan_ok(t); поза запрашивается 200 Гц, как в узле. spoil(ranges, rng) портит скан.
+    250 Гц (порядок ядра, по именам), сканы 20 Гц, если scan_ok(t); поза запрашивается 200 Гц, как в узле.
+    spoil(ranges, rng) портит скан.
     Возвращает оценщик, {t: (оценка xy, истина xy)} в моменты probe и в конце."""
     nom = {g: np.array([sx * 0.19, sy * 0.13, -0.3]) for g, (sx, sy) in LEG_TABLE.items()}
     est = est or LidarEstimator()
