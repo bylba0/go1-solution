@@ -6,7 +6,9 @@
 Режимы:
   replay  — прогон go1_odometry.core по входам bag (таймер 200 Гц sim, выход 50 Гц), без ROS-графа (быстро):
             python3 tools/dev_t4_offline_eval.py replay ~/ros2_ws/data/t4_bags/t4_A_square_left \\
-                [--cache DIR] [--set k=v ...]
+                [--cache DIR] [--set k=v ...] [--estimator legs|lidar]
+            lidar — go1_odometry.lidar_mode (IMU + /scan + суставы) с той же подачей: на тике 200 Гц — все новые IMU
+            и сканы, последнее /joint_states; поза — на тике публикации.
   odom    — оценка /odom, записанного с живого узла (tools/dev_t4_play.sh: bag play входов + узел + record):
             python3 tools/dev_t4_offline_eval.py odom <исходный_bag> <bag_с_/odom>
 Метрики: RPE по участкам пути GT ≈ 1 м (|Δp_est − Δp_gt| / длина участка, xy), дрейф на последней стоянке
@@ -42,14 +44,19 @@ def read_bag(path, topics):
         yield t, deserialize_message(d, cls[t]), ts
 
 
-def load_inputs(bag, cache=None):
+def load_inputs(bag, cache=None, scans=False):
     if cache:
-        f = pathlib.Path(cache) / (pathlib.Path(bag).name + '.npz')
+        f = pathlib.Path(cache) / (pathlib.Path(bag).name + ('.scan' if scans else '') + '.npz')
         if f.exists():
             return dict(np.load(f))
-    js_t, js_q, imu, gt = [], [], [], []
-    for t, m, _ in read_bag(bag, ['/joint_states', '/imu/data', '/odom/ground_truth']):
-        if t == '/joint_states':
+    js_t, js_q, imu, gt, scan_t, scan_r, scan_a = [], [], [], [], [], [], []
+    topics = ['/joint_states', '/imu/data', '/odom/ground_truth'] + (['/scan'] if scans else [])
+    for t, m, _ in read_bag(bag, topics):
+        if t == '/scan':
+            scan_t.append(_st(m.header.stamp))
+            scan_r.append(np.asarray(m.ranges, dtype=np.float32))
+            scan_a.append([m.angle_min, m.angle_increment])
+        elif t == '/joint_states':
             idx = {n: i for i, n in enumerate(m.name)}
             js_t.append(_st(m.header.stamp))
             js_q.append([m.position[idx[n]] for n in ORDER])
@@ -60,6 +67,8 @@ def load_inputs(bag, cache=None):
             p, o = m.pose.pose.position, m.pose.pose.orientation
             gt.append([_st(m.header.stamp), p.x, p.y, p.z, o.x, o.y, o.z, o.w])
     d = dict(js_t=np.array(js_t), js_q=np.array(js_q), imu=np.array(imu), gt=np.array(gt))
+    if scans:
+        d.update(scan_t=np.array(scan_t), scan_r=np.array(scan_r), scan_a=np.array(scan_a))
     if cache:
         pathlib.Path(cache).mkdir(parents=True, exist_ok=True)
         np.savez(f, **d)
@@ -89,6 +98,44 @@ def replay(d, params, timer_hz=200.0, pub_hz=50.0):
             est.set_joints(js_t[ij - 1], js_q[ij - 1])
         if est.step(t) and k % every == 0:
             out.append([t, *est.position, *est.orientation])
+    return np.array(out)
+
+
+def replay_lidar(d, timer_hz=200.0, pub_hz=50.0, leg_scale=1.0):
+    from go1_odometry.lidar_mode import LIDAR_JOINT_NAMES, LidarEstimator
+    est = LidarEstimator(leg_scale=leg_scale)
+    perm = [ORDER.index(n) for n in LIDAR_JOINT_NAMES]
+    js_t, js_q, imu, sc_t = d['js_t'], d['js_q'][:, perm], d['imu'], d['scan_t']
+    t0 = min(js_t[0], imu[0, 0])
+    t_end = max(js_t[-1], imu[-1, 0])
+    ij = ii = isc = 0
+    out = []
+    n = int((t_end - t0) * timer_hz)
+    every = int(round(timer_hz / pub_hz))
+    for k in range(1, n + 1):
+        t = t0 + k / timer_hz
+        ev = []
+        while ii < len(imu) and imu[ii, 0] <= t + 1e-9:
+            ev.append(('imu', imu[ii, 0], imu[ii, 1:5]))
+            ii += 1
+        j0 = ij
+        while ij < len(js_t) and js_t[ij] <= t + 1e-9:
+            ij += 1
+        if ij > j0:
+            ev.append(('js', js_t[ij - 1], js_q[ij - 1]))
+        while isc < len(sc_t) and sc_t[isc] <= t + 1e-9:
+            ev.append(('scan', sc_t[isc], d['scan_r'][isc], *d['scan_a'][isc]))
+            isc += 1
+        est.feed(ev)
+        if k % every == 0:
+            p = est.pose(t)
+            if p is not None:
+                out.append([t, p[0][0], p[0][1], 0.0, *p[1]])
+    ms = np.array(est.scan_ms)
+    if len(ms):
+        print(f'сканы: {est.n_scans_in}, сопоставлено {est.core.n_match}, пропущено {est.core.n_skip}, '
+              f'опорных {est.core.n_key}, вырожд. {est.core.n_degen}; обработка {ms.mean():.1f} мс ср, {ms.max():.1f} макс',
+              file=sys.stderr)
     return np.array(out)
 
 
@@ -179,11 +226,12 @@ def main():
     ap.add_argument('bag')
     ap.add_argument('odom_bag', nargs='?')
     ap.add_argument('--cache', help='каталог кэша входов (npz)')
-    ap.add_argument('--set', action='append', default=[], help='параметр оценщика k=v')
+    ap.add_argument('--set', action='append', default=[], help='параметр оценщика k=v (legs; lidar: leg_scale=…)')
+    ap.add_argument('--estimator', choices=['legs', 'lidar'], default='legs', help='режим replay')
     a = ap.parse_args()
     here = pathlib.Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(here / 'src' / 'go1_odometry'))
-    d = load_inputs(a.bag, a.cache)
+    d = load_inputs(a.bag, a.cache, scans=a.mode == 'replay' and a.estimator == 'lidar')
     if a.mode == 'replay':
         params = {}
         for kv in a.set:
@@ -193,7 +241,7 @@ def main():
             except ValueError:
                 pass
             params[k] = v
-        est = replay(d, params)
+        est = replay_lidar(d, **params) if a.estimator == 'lidar' else replay(d, params)
         nan = 0
     else:
         est, nan = read_odom(a.odom_bag)
