@@ -5,6 +5,7 @@ go1_odometry:
     imu_topic: /imu/data
     joint_states_topic: /joint_states
     foot_force_topic: /foot_force
+    scan_topic: /scan           # только в режиме lidar (подписка RELIABLE)
     odom_topic: /odom
     odom_frame: odom
     base_frame: trunk
@@ -16,7 +17,12 @@ go1_odometry:
     foot_force_threshold: 5.0
     pose_covariance_diagonal: [0.01, 0.01, 0.01, 0.001, 0.001, 0.003]
     twist_covariance_diagonal: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    diag_period: 10.0           # с wall: строка диагностики (паузы /odom, сканы, время сопоставления)
+    lidar:
+      leg_scale: 1.0            # множитель пути по ногам в прогнозе ядра lidar (1,0 — штатная высота корпуса)
+      worker_thread: true       # сопоставление сканов в отдельном потоке (false — синхронно, только для тестов)
     estimator:
+      mode: legs                # legs — IMU + кинематика ног; lidar — IMU + /scan + ноги (lidar_core); launch: estimator_mode:=lidar
       orientation_mode: imu     # imu — кватернион /imu/data; gyro — запасной (интегрирование угловой скорости)
       heading_reference: world  # world — стартовый курс = мировой yaw IMU; initial — курс от 0 на старте
       stance_height: 0.005
