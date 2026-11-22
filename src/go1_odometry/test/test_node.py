@@ -361,3 +361,36 @@ def test_lidar_fallback_to_legs_without_scans_and_back():
 def test_lidar_requires_world_heading():
     with pytest.raises(ValueError):
         _node(use_sim_time=True, **LIDAR, **{'estimator.heading_reference': 'initial'})
+
+
+def test_publish_schedule_never_repeats_stamp_on_sim_time_jumps():
+    """При CPUS=0.5 /clock приходит пачками: sim-время прыгает на 0,04 с (2 периода 50 Гц). Раньше второй тик с тем же t
+    публиковал повторно (один stamp — две позы). Теперь: на каждое значение t — не больше одной публикации,
+    stamp растёт."""
+    import numpy as np
+
+    from go1_odometry.node import publish_schedule
+    period, eps = 0.02, 0.5 / 200.0
+    rng = np.random.default_rng(7)
+    t, nxt, pubs = 0.0, None, []
+    for _ in range(20000):
+        t = round(t + rng.choice([0.005, 0.005, 0.005, 0.01, 0.02, 0.04, 0.045, 0.1]), 6)
+        for _rep in range(int(rng.integers(1, 4))):          # таймер может сработать несколько раз при одном t
+            due, nxt = publish_schedule(nxt, t, period, eps)
+            assert nxt > t + eps
+            if due:
+                pubs.append(t)
+    pubs = np.array(pubs)
+    assert np.all(np.diff(pubs) > 0), 'повтор stamp'
+    assert len(pubs) > 0.9 * (t / max(period, np.mean(np.diff(pubs))))
+    # обычный ход 200 Гц тиков — публикация ровно 50 Гц
+    t, nxt, n = 0.0, None, 0
+    for _ in range(2000):
+        t = round(t + 0.005, 6)
+        due, nxt = publish_schedule(nxt, t, period, eps)
+        n += due
+    assert abs(n - 500) <= 1
+    # ровно два периода скачка — та самая ситуация дефекта
+    due1, nxt = publish_schedule(10.0, 10.04, period, eps)
+    due2, nxt = publish_schedule(nxt, 10.04, period, eps)
+    assert due1 and not due2

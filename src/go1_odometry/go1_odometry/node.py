@@ -51,6 +51,20 @@ TF_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=100, reliability=Reli
                     durability=DurabilityPolicy.VOLATILE)
 
 
+def publish_schedule(next_pub, t, period, eps):
+    """Публиковать ли на тике с sim-временем t и следующий момент публикации.
+    Следующий момент всегда строго позже t + eps: при скачке sim-времени (сим под нагрузкой отдаёт /clock пачками)
+    второй тик с тем же t не публикует повторно — иначе два /odom+TF с одним stamp и разной позой
+    (найдено при CPUS=0.5).
+    При отставании — без «догоняющей» пачки."""
+    if next_pub is not None and t + eps < next_pub:
+        return False, next_pub
+    nxt = t + period if next_pub is None or t - next_pub > period else next_pub + period
+    while nxt <= t + eps:
+        nxt += period
+    return True, nxt
+
+
 def _stamp_to_sec(s):
     return s.sec + s.nanosec * 1e-9
 
@@ -147,6 +161,7 @@ class OdometryNode(Node):
         self._next_pub = None
         self._last_valid = None   # (pos, quat, lin, ang)
         self.published = 0
+        self.dup_skipped = 0             # пропущено публикаций с неновым stamp (защита)
         self._pub_eps = 0.5 / update_rate   # допуск: публикация на ближайшем тике расчёта
         self.create_timer(1.0 / update_rate, self._on_timer)
         self.get_logger().info(
@@ -246,10 +261,8 @@ class OdometryNode(Node):
             self._diag()
         if self._last_valid is None:
             return
-        if self._next_pub is None or t + self._pub_eps >= self._next_pub:
-            # следующий момент публикации по sim time; при отставании — без «догоняющей» пачки
-            self._next_pub = t + self.pub_period if self._next_pub is None or t - self._next_pub > self.pub_period \
-                else self._next_pub + self.pub_period
+        due, self._next_pub = publish_schedule(self._next_pub, t, self.pub_period, self._pub_eps)
+        if due:
             self._publish(now.to_msg())
 
     # ------------------------------------------------------------ режим lidar
@@ -316,7 +329,8 @@ class OdometryNode(Node):
 
     def _diag(self):
         self._diag_t = time.monotonic()
-        msg = (f'/odom: {self.published} опубликовано, пауза макс wall {1000 * self._gap_wall[0]:.0f} мс '
+        msg = (f'/odom: {self.published} опубликовано (повтор stamp пропущено {self.dup_skipped}), '
+               f'пауза макс wall {1000 * self._gap_wall[0]:.0f} мс '
                f'(всего {1000 * self._gap_wall[1]:.0f}), по stamp {1000 * self._gap_stamp[0]:.0f} мс '
                f'(всего {1000 * self._gap_stamp[1]:.0f}); таймер макс {1000 * self._timer_max[0]:.1f} мс wall '
                f'(всего {1000 * self._timer_max[1]:.1f})')
@@ -340,6 +354,9 @@ class OdometryNode(Node):
         return super().destroy_node()
 
     def _publish(self, stamp):
+        if self._pub_stamp is not None and _stamp_to_sec(stamp) <= self._pub_stamp:
+            self.dup_skipped += 1          # stamp не повторяется и не идёт назад (одна поза на один stamp)
+            return
         pos, quat, lin, ang = self._last_valid
         od = Odometry()
         od.header.stamp = stamp
