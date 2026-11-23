@@ -142,6 +142,7 @@ class SafetyCore:
         self.goal = None             # последняя принятая (клипованная, достижимая) цель
         self.cmd = None              # последние принятые dq/kp/kd/tau (клипованные), dict
         self.last_input_t = None
+        self._awaiting_safe_command = True
         self.blocked = False         # упор на такте (страховка; при проверке пути заранее не возникает)
         self.waypoints = deque()     # отход назад по истории перед движением к goal
         self.history = deque(maxlen=int(history_len))
@@ -212,6 +213,7 @@ class SafetyCore:
         if res == 'found':
             self.goal = goal
             self.cmd = cmd
+            self._awaiting_safe_command = False
             self.blocked = False
             self.waypoints = deque()
             if k >= 0:                               # отход: hist[n-2], ..., hist[k] (текущая поза = hist[n-1])
@@ -254,8 +256,10 @@ class SafetyCore:
         if self.out_q is None:                       # команда раньше /lowstate: стартуем из home
             self._init_pose(HOME_Q)
         now = float(now)
+        self._expire_input(now)
         if np.array_equal(goal, self.goal) and self.search is None:
             self.cmd = cmd                           # та же цель — обновляем коэффициенты
+            self._awaiting_safe_command = False
         elif self.search is not None and np.array_equal(goal, self.search.goal):
             self.search_cmd = cmd                    # та же цель ещё в поиске
         else:
@@ -275,8 +279,21 @@ class SafetyCore:
         return True
 
     # ------------------------------------------------------------------ такт
+    def _expire_input(self, now):
+        if self.last_input_t is None or now < self.last_input_t + self.input_timeout:
+            return
+        # Freeze the last checked output, not the requested goal: that goal
+        # may still need a slew or a retreat through multiple waypoints.
+        self.last_input_t = None
+        self._awaiting_safe_command = True
+        self.goal = self.out_q
+        self.waypoints.clear()
+        self.search = self.search_cmd = self.search_hist = None
+        self.blocked = False
+
     def holding(self, now):
-        return self.cmd is None or self.last_input_t is None or (float(now) - self.last_input_t) > self.input_timeout
+        return (self._awaiting_safe_command or self.last_input_t is None
+                or float(now) >= self.last_input_t + self.input_timeout)
 
     def _hold_gains(self):
         if self.cmd is not None:
@@ -317,6 +334,7 @@ class SafetyCore:
 
     def think(self, now, deadline):
         """Только продвинуть незаконченный поиск пути (без движения выхода) — когда предыдущая поза ещё не опубликована."""
+        self._expire_input(now)
         if self.search is not None:
             self._continue_search(deadline, now)
 
@@ -327,9 +345,8 @@ class SafetyCore:
             return None
         if deadline is None:
             deadline = time.perf_counter() + self.budget_tick_s
-        if self.search is not None:
-            self._continue_search(deadline, now)
-        if self.search is None and not self.blocked:  # пока идёт поиск пути — стоим на месте
+        self.think(now, deadline)
+        if self.last_input_t is not None and self.search is None and not self.blocked:
             if self.waypoints:
                 if self._move_toward(self.waypoints[0], deadline):
                     self.waypoints.popleft()

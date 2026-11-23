@@ -319,6 +319,51 @@ def test_input_loss_hold(core, checker):
     assert not core.step(1.7).holding
 
 
+def test_input_loss_during_retreat_holds_position_until_new_command(core, checker):
+    # Two allowed targets; the direct path from a to b is blocked. Feed a
+    # real command sequence so SafetyCore schedules the retreat itself.
+    a = np.array([.622, .764, -1.954, -.755, -.662, -2.435,
+                  -.270, 4.120, -1.109, -.033, 1.674, -1.534])
+    b = np.array([.466, .688, -1.418, -.131, 1.022, -1.491,
+                  .002, 1.148, -1.543, -.643, .301, -2.256])
+    assert checker.path_clear(HOME_Q, a) is True
+    assert checker.path_clear(a, b) is False
+    assert checker.path_clear(HOME_Q, b) is True
+    before = run(core, 0.0, 2.0, dt=0.02, cmd=make_cmd(a))[-1]
+    assert np.array_equal(before.q, a)
+    command = make_cmd(b, kp=60.0, kd=3.0, dq=0.5, tau=1.0)
+    # Keep the simulated schedule deterministic instead of benchmarking the
+    # initial collision search under a wall-clock budget.
+    import time
+    assert core.on_command(command, 2.0, time.perf_counter() + 1.0)
+    first = core.step(2.0)
+    assert core.stats.retreats == 1
+    assert not np.array_equal(first.q, a), 'первая команда должна начать отход'
+    outs = [first] + [core.step(2.0 + i * 0.02) for i in range(1, 60)]
+    # Default watchdog fires at 0.3 s; the spec allows up to 0.5 s.
+    stopped = outs[14].q
+    assert not np.array_equal(stopped, b), 'обрыв должен прервать незавершённый переход'
+    assert not outs[14].holding
+    for out in outs[15:]:
+        assert out.holding
+        np.testing.assert_array_equal(out.q, stopped)
+        assert np.all(out.dq == 0) and np.all(out.tau == 0)
+        assert np.all(out.kp == 60.0) and np.all(out.kd == 3.0)
+
+    command = make_cmd(b, kp=60.0, kd=3.0, dq=0.25, tau=0.5)
+    assert core.on_command(command, 4.0, deadline=0.0)
+    pending = core.step(4.0, deadline=0.0)
+    np.testing.assert_array_equal(pending.q, stopped)
+    assert np.all(pending.dq == 0) and np.all(pending.tau == 0)
+    assert pending.holding
+
+    resumed = run(core, 4.02, 6.0, dt=0.02, cmd=command)
+    assert not resumed[-1].holding
+    np.testing.assert_array_equal(resumed[-1].q, b)
+    assert np.all(resumed[-1].dq == 0.25) and np.all(resumed[-1].tau == 0.5)
+    check_stream([outs[-1], *resumed], checker)
+
+
 def test_hold_with_zero_kp_uses_default_gains(core):
     run(core, 0.0, 0.2, cmd=make_cmd(HOME_Q, kp=0.0, kd=0.0))
     o = run(core, 0.2, 1.0)[-1]
