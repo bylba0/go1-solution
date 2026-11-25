@@ -1,0 +1,13 @@
+{
+ "seed": 2,
+ "workers": 4,
+ "resume": null,
+ "python": "3.12.13",
+ "mujoco": "3.3.7",
+ "numpy": "1.26.4",
+ "torch": "2.15.0+cu132",
+ "system": "Linux",
+ "machine": "x86_64",
+ "device": "cuda",
+ "commit": "a4f0a0bcfe15a6a3548be23057cfe419ff924367"
+}

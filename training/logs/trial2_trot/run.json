@@ -1,0 +1,11 @@
+{
+ "seed": 0,
+ "workers": 6,
+ "resume": null,
+ "python": "3.12.13",
+ "mujoco": "3.3.7",
+ "numpy": "1.26.4",
+ "torch": "2.15.0",
+ "system": "Darwin",
+ "machine": "arm64"
+}
