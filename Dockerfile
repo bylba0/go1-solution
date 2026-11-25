@@ -6,10 +6,13 @@
 ARG BASE_IMAGE=registry.cookcloud.ru/base_images/ros2-base-humble-amd64:v1.0.1
 # unitree_ros2: тот же коммит, что у симулятора организаторов (Dockerfile сима, UNITREE_ROS2_REF)
 ARG UNITREE_ROS2_REF=668d1ec5a05d1c38d3306bdca7d59f2ba3581a88
+# T3: SHA-256 весов политики go1_walk (training/logs/trial2_trot, см. training/README.md); несовпадение → сборка падает
+ARG POLICY_SHA256=9112d209f49f6ebac54aa90b7584fe8f1bb97856d6502a5c7cf577562e7c050e
 
 # ---------------------------------------------------------------- этап 1: сборка
 FROM --platform=linux/amd64 ${BASE_IMAGE} AS build
 ARG UNITREE_ROS2_REF
+ARG POLICY_SHA256
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -29,6 +32,8 @@ RUN git init -q /tmp/unitree_ros2 && cd /tmp/unitree_ros2 \
     && rm -rf /tmp/unitree_ros2
 
 COPY src/ /opt/go1_ws/src/
+RUN echo "${POLICY_SHA256}  /opt/go1_ws/src/go1_walk/policy/policy.npz" | sha256sum -c --strict - \
+    && test "$(cut -d' ' -f1 /opt/go1_ws/src/go1_walk/policy/policy.npz.sha256)" = "${POLICY_SHA256}"
 RUN source /opt/ros/humble/setup.bash && cd /opt/go1_ws \
     && colcon build --merge-install --install-base /opt/go1_ws/install \
          --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
@@ -43,6 +48,7 @@ RUN python3 -m pip download --only-binary=:all: --no-deps --require-hashes \
 
 # ---------------------------------------------------------------- этап 2: итоговый образ
 FROM --platform=linux/amd64 ${BASE_IMAGE} AS runtime
+ARG POLICY_SHA256
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -56,6 +62,7 @@ COPY --from=build /opt/pyprefix/local/ /usr/local/
 RUN python3 -c "import mujoco, numpy; assert mujoco.__version__ == '3.3.7', mujoco.__version__; assert int(numpy.__version__.split('.')[0]) < 2"
 
 COPY --from=build /opt/go1_ws/install /opt/go1_ws/install
+RUN echo "${POLICY_SHA256}  /opt/go1_ws/install/share/go1_walk/policy/policy.npz" | sha256sum -c --strict -
 
 # Модель Go1 и перечень пар коллизий (источник: models/unitree_go1/SOURCE.md) + проверка SHA-256
 COPY models/unitree_go1 /opt/go1/models/unitree_go1
@@ -73,6 +80,7 @@ RUN python3 /opt/go1/validate_manifest.py /opt/go1/solution_manifest.json /opt/g
 # Проверки на этапе сборки: типы unitree_go, манифест, ping без ROS
 RUN source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash \
     && python3 -c "from unitree_go.msg import LowCmd, LowState; assert len(LowCmd().motor_cmd) == 20" \
+    && python3 -c "from go1_walk.controller import WalkController; WalkController('/opt/go1_ws/install/share/go1_walk/policy/policy.npz')" \
     && /entrypoint.sh ping | python3 -c "import json, sys; json.load(sys.stdin)"
 
 # Не root: пользователь ros (UID 1000) есть в базе организаторов; в ros:humble-ros-base — создаём

@@ -2,8 +2,9 @@
   "protocol_version": "1.0",
   "supported_tasks": [
     "T2",
+    "T3",
     "T4"
   ],
-  "self_trained_rl": false,
-  "preferred_speed_mps": null
+  "self_trained_rl": true,
+  "preferred_speed_mps": 0.3
 }
