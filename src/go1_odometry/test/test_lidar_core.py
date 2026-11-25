@@ -1,8 +1,8 @@
 """Ядро режима lidar (go1_odometry.lidar_core) на синтетике: прямоугольная комната, известное движение, коридор,
 стоянка, пропуски, время назад, ноги.
 
-Перенесено из тестов ядра-источника (ветка personal/t4, коммит 5062eb2, solution/ros_ws/src/go1_odom/test/test_core.py,
-автор — Артём, BSD-3-Clause). Правки: импорт go1_odom.core → go1_odometry.lidar_core; убран test_recording (нужна
+Тесты ядра; разработано командой «Кафедра проблем», BSD-3-Clause.
+Правки: импорт go1_odom.core → go1_odometry.lidar_core; убран test_recording (нужна
 запись .npz формата источника с контактами; на наших bag ядро проверяется tools/dev_t4_offline_eval.py --estimator lidar).
 Порядок суставов здесь — порядок ядра (JOINTS: FL, FR, RL, RR); раскладка по именам из /joint_states — test_lidar_mode.py.
 """

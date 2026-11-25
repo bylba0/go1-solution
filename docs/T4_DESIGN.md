@@ -74,8 +74,7 @@ Judge сам ведёт робота (Gazebo Classic 11 + CHAMP, Highlevel, `/cm
 - Переменные DDS (`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`, `ROS_LOCALHOST_ONLY`) не трогает.
 
 ### Режим lidar (`estimator.mode: lidar`; по умолчанию с ada5607)
-**Источник ядра.** `lidar_core.py` — ядро одометрии разработчика команды Артёма: ветка `personal/t4`, коммит `5062eb2`,
-файл `solution/ros_ws/src/go1_odom/go1_odom/core.py`, лицензия BSD-3-Clause (тег `<license>` пакета-источника; остальной
+**Источник ядра.** `lidar_core.py` — ядро одометрии, разработано командой «Кафедра проблем», BSD-3-Clause (остальной
 пакет `go1_odometry` — MIT). Код ядра **не менялся**: добавлен только заголовок (источник, лицензия, список правок).
 Узел источника (`odom_node.py`, подписан на `/go1_contacts`) не переносился. Тесты ядра перенесены в
 `test/test_lidar_core.py` (без `test_recording` — ему нужна запись `.npz` формата источника).
