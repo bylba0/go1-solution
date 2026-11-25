@@ -6,10 +6,10 @@
 
 | Задание | Статус | Где |
 |---|---|---|
-| T1 — образ и `/entrypoint.sh ping` | готово | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
-| T2 — Safety Block | сдан 20.11.2026 (judge_sim 12/12, в т.ч. с симулятором организаторов) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
-| T4 — одометрия (`/odom` + TF `odom → trunk`) | готово, заявлено в манифесте (стенд: 5 живых + 4 bag, худшее RPE 11,1 %, 20/20); сдача — по решению владельца | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
-| T3 — ходьба на обученной политике (≥ 3 м за 90 с) | заявлено в манифесте (`self_trained_rl: true`, 0,3 м/с); политика и обучение — команда; живая приёмка — у тестировщика | `src/go1_walk`, `src/go1_bringup/launch/t3.launch.py`, [training/README.md](training/README.md) |
+| T1 — образ и `/entrypoint.sh ping` | сдано | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
+| T2 — Safety Block | сдано (judge_sim 12/12, в т.ч. с симулятором организаторов; удержание при обрыве входа — ТЗ 4.4) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
+| T4 — одометрия (`/odom` + TF `odom → trunk`) | сдано (режим lidar, запасной legs; худший RPE 3,4 %, 20/20) | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
+| T3 — ходьба на обученной политике (≥ 3 м за 90 с) | заявлено в манифесте (`self_trained_rl: true`, 0,3 м/с); политика и обучение — команда; 10/10 эпизодов в симуляторе организаторов | `src/go1_walk`, `src/go1_bringup/launch/t3.launch.py`, [training/README.md](training/README.md) |
 | T5 | не начато | — |
 
 Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`, сейчас `["T2", "T3", "T4"]`, `self_trained_rl: true`, `preferred_speed_mps: 0.3`);
