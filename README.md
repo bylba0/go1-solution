@@ -9,9 +9,10 @@
 | T1 — образ и `/entrypoint.sh ping` | готово | `Dockerfile`, `entrypoint.sh`, `solution_manifest.json`, `tests/check_t1.sh` |
 | T2 — Safety Block | сдан 20.11.2026 (judge_sim 12/12, в т.ч. с симулятором организаторов) | `src/go1_safety`, `tools/judge_sim.py`, `docs/T2_DESIGN.md` |
 | T4 — одометрия (`/odom` + TF `odom → trunk`) | готово, заявлено в манифесте (стенд: 5 живых + 4 bag, худшее RPE 11,1 %, 20/20); сдача — по решению владельца | `src/go1_odometry`, `tools/judge_t4.py`, `docs/T4_DESIGN.md`, `docs/T4_REPORT.md` |
-| T3, T5 | не начато | — |
+| T3 — ходьба на обученной политике (≥ 3 м за 90 с) | заявлено в манифесте (`self_trained_rl: true`, 0,3 м/с); политика и обучение — команда; живая приёмка — у тестировщика | `src/go1_walk`, `src/go1_bringup/launch/t3.launch.py`, [training/README.md](training/README.md) |
+| T5 | не начато | — |
 
-Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`, сейчас `["T2", "T4"]`);
+Заявленные задания перечислены в одном месте — `solution_manifest.json` (поле `supported_tasks`, сейчас `["T2", "T3", "T4"]`, `self_trained_rl: true`, `preferred_speed_mps: 0.3`);
 `/entrypoint.sh ping` печатает его без запуска ROS.
 
 Новым участникам команды — [docs/TEAM_ONBOARDING.md](docs/TEAM_ONBOARDING.md).
@@ -71,6 +72,36 @@ tools/live_demo.sh go1-solution:dev
 `judge_sim` — не официальный Judge: сценарии (безопасная траектория, выход за пределы, скачок 30°, поза с самоколлизией,
 NaN/Inf, обрыв входа) и пороги взяты из текста ТЗ_T2; коллизии проверяются независимо (исходный go1.xml, шаг 0.1°, > 1 мм).
 
+## Проверка T3
+
+**Политика и обучение — команда**; здесь они встроены в общий образ вместе с нашим Safety Block.
+
+Как устроено (`/entrypoint.sh T3` → `src/go1_bringup/launch/t3.launch.py`, все узлы с `use_sim_time:=true`):
+`/cmd_vel` + `/lowstate` → `go1_walk` (`walk_node`) → `/lowcmd_bare` → `go1_safety` (Safety Block T2) → `/lowcmd`.
+- Политика — **остаток PPO поверх опорной рыси**: цель суставам = стойка + опорная рысь 2 Гц + поправка сети.
+- Исполнение — только numpy, без torch: шаг политики 50 Гц по `LowState.tick`, между шагами цели интерполируются и
+  выдаются 200 Гц; цели обрезаются по области без самоударов, шаг цели ≤ 4,3° на сустав (меньше 4,5° Safety Block).
+- Параметры запуска: `kp 45` (обучено на 50 с разбросом ±10 %), `heading_hold: true` — контур курса добавляет
+  `wz = clip(−3·(ψ − ψ0), ±0,3)`. Без `/cmd_vel` политика работает с нулевой командой (стойка); Safety Block держит измеренную позу
+  до первой безопасной команды и при обрыве входа > 0,3 с.
+- Веса — `src/go1_walk/policy/policy.npz`, SHA-256 `9112d209…c050e` (`policy.npz.sha256`); при сборке образа сумма
+  проверяется, несовпадение — сборка падает. `training/` в образ не входит.
+
+Доказательства обучения — [training/README.md](training/README.md): код среды и PPO (`training/env.py`, `training/ppo.py`,
+`training/train.py`), конфигурации, журналы прогонов. Веса взяты из прогона
+[training/logs/trial2_trot](training/logs/trial2_trot) (контрольная точка `final.pt`, кривая, журнал, оценка);
+тест `training/tests/test_package.py` проверяет, что экспорт `final.pt` побитно равен сдаваемому `policy.npz`.
+Повторы рецепта на трёх сидах — `training/logs/walk_trot_s0..2` (в `walk_trot_s2` — точка `ckpt_000480.pt`).
+
+```bash
+# unit-тесты исполнителя политики (в образе)
+docker run --rm --network none --mount type=bind,src=$PWD/src/go1_walk,dst=/src,readonly --entrypoint bash \
+  go1-solution:dev -c "source /opt/ros/humble/setup.bash && source /opt/go1_ws/install/setup.bash && cd /tmp && python3 -m pytest /src/test -q"
+# тесты обучения (вне образа, нужен Python ≥ 3.11 для torch 2.15.0: training/requirements.txt)
+pip install -r training/requirements.txt
+GO1_MODEL_DIR=$PWD/models/unitree_go1 GO1_SIM_DIR=<go1-simulator-public> python -m pytest -q training/tests
+```
+
 ## Проверка T4
 
 Узел `go1_odometry` (`/entrypoint.sh T4` → `go1_bringup/launch/t4.launch.py`) публикует `/odom` (`odom → trunk`) и
@@ -114,6 +145,7 @@ tools/judge_t4.py reanalyze /tmp/t4_bag/record.npz --align position
 git clone https://github.com/Urika000/go1-simulator-public.git && cd go1-simulator-public
 export SIM_IMAGE=registry.cookcloud.ru/go1-hackathon-remote-stage/go1-sim:v1.0
 python3 run_local.py --task T2 --sim-image "$SIM_IMAGE" --participant-image go1-solution:dev --headless --logs
+python3 run_local.py --task T3 --sim-image "$SIM_IMAGE" --participant-image go1-solution:dev --headless --logs   # MuJoCo
 python3 run_local.py --task T4 --sim-image "$SIM_IMAGE" --participant-image go1-solution:dev --headless --logs   # Gazebo, lockstep
 ```
 
@@ -180,4 +212,4 @@ docker run --rm --network host -e ROS_DOMAIN_ID=<домен сима> -e CYCLONE
 
 ## Лицензии
 
-Код — MIT (`LICENSE`). Модель Unitree Go1 (MuJoCo Menagerie) — BSD-3-Clause, `models/unitree_go1/LICENSE`.
+Код — MIT (`LICENSE`); пакет `src/go1_walk` — BSD-3-Clause (`src/go1_walk/package.xml`). Модель Unitree Go1 (MuJoCo Menagerie) — BSD-3-Clause, `models/unitree_go1/LICENSE`.
